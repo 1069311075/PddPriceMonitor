@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,6 +81,19 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
     val products by viewModel.products.collectAsState()
     val debugInfo by MonitorDebugState.info.collectAsState()
     var captureStarted by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val filteredProducts = remember(products, searchQuery) {
+        val query = searchQuery.trim()
+        if (query.isBlank()) {
+            products
+        } else {
+            val normalizedQuery = normalizeSearchText(query)
+            products.filter { item ->
+                item.title.contains(query, ignoreCase = true) ||
+                    item.normalizedTitle.contains(normalizedQuery, ignoreCase = true)
+            }
+        }
+    }
 
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -131,14 +145,40 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
         Spacer(modifier = Modifier.height(18.dp))
 
         Text(
-            text = "Price history",
+            text = "Price history (${filteredProducts.size}/${products.size})",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Search product") },
+            placeholder = { Text("Type brand, model, or keyword") },
+            trailingIcon = {
+                if (searchQuery.isNotBlank()) {
+                    TextButton(onClick = { searchQuery = "" }) {
+                        Text("Clear")
+                    }
+                }
+            }
+        )
+        Spacer(modifier = Modifier.height(8.dp))
 
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(products, key = { it.id }) { item ->
+            if (filteredProducts.isEmpty()) {
+                item {
+                    Text(
+                        text = if (searchQuery.isBlank()) "No saved products yet" else "No matching products",
+                        modifier = Modifier.padding(vertical = 16.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            items(filteredProducts, key = { it.id }) { item ->
                 ProductRow(item)
                 Divider()
             }
@@ -232,6 +272,11 @@ private fun formatPrice(cents: Long): String =
 
 private fun formatTime(timeMillis: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(Date(timeMillis))
+
+private fun normalizeSearchText(text: String): String =
+    text.lowercase()
+        .replace(Regex("[^\\p{IsHan}a-z0-9]+"), "")
+        .trim()
 
 private fun openPdd(context: Context) {
     val launchIntent = context.packageManager.getLaunchIntentForPackage(PddForegroundState.PDD_PACKAGE_NAME)
