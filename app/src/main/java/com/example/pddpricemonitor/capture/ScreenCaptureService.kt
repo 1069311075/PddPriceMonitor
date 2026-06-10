@@ -36,12 +36,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class ScreenCaptureService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var worker: Job? = null
+    private var autoCollapseJob: Job? = null
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
@@ -50,6 +52,8 @@ class ScreenCaptureService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+    private var collapsedOverlayX: Int? = null
+    private var collapsedOverlayY: Int? = null
     private var ballText: TextView? = null
     private var resultPanel: LinearLayout? = null
     private var titleEdit: EditText? = null
@@ -118,6 +122,7 @@ class ScreenCaptureService : Service() {
             val fullBitmap = source.acquireLatestBitmap()
             if (fullBitmap == null) {
                 updateOverlayStatus("No frame", showPanel = false)
+                scheduleStatusRestore()
                 MonitorDebugState.update("No screen frame yet")
                 return@launch
             }
@@ -128,6 +133,7 @@ class ScreenCaptureService : Service() {
                 val product = result.products.singleOrNull()
                 if (product == null) {
                     updateOverlayStatus("No item", showPanel = false)
+                    scheduleStatusRestore()
                     MonitorDebugState.update(
                         message = result.skippedReason ?: "No product detected",
                         textLength = text.text.length,
@@ -146,6 +152,7 @@ class ScreenCaptureService : Service() {
                 )
             } catch (error: Throwable) {
                 updateOverlayStatus("Error", showPanel = false)
+                scheduleStatusRestore()
                 MonitorDebugState.update("Capture/OCR error: ${error.javaClass.simpleName}")
             } finally {
                 fullBitmap.recycle()
@@ -170,8 +177,9 @@ class ScreenCaptureService : Service() {
         )
 
         scope.launch {
+            cancelAutoCollapse()
             val saved = repo.saveManualProduct(product)
-            updateOverlayStatus(formatPrice(priceCents), showPanel = false)
+            updateOverlayStatus("OCR", showPanel = false)
             MonitorDebugState.update(
                 message = "Saved edited product",
                 parsedProducts = 1,
@@ -202,10 +210,14 @@ class ScreenCaptureService : Service() {
         resultPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(dp(10), dp(10), dp(10), dp(10))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
             background = roundedBackground(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(dp(290), WindowManager.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(270), WindowManager.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(8)
+            }
+            setOnTouchListener { _, _ ->
+                scheduleAutoCollapse()
+                false
             }
         }
 
@@ -214,11 +226,26 @@ class ScreenCaptureService : Service() {
             minLines = 2
             maxLines = 3
             textSize = 13f
+            setOnClickListener { scheduleAutoCollapse() }
         }
         priceEdit = EditText(this).apply {
             hint = "Price, e.g. 185.05"
             textSize = 16f
+            setOnClickListener { scheduleAutoCollapse() }
         }
+
+        val decimalButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        decimalButtons.addView(Button(this).apply {
+            text = "/10"
+            setOnClickListener { shiftPriceDecimal(-1) }
+        })
+        decimalButtons.addView(Button(this).apply {
+            text = "x10"
+            setOnClickListener { shiftPriceDecimal(1) }
+        })
 
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -230,11 +257,15 @@ class ScreenCaptureService : Service() {
         })
         buttons.addView(Button(this).apply {
             text = "Close"
-            setOnClickListener { scope.launch { updateOverlayStatus("OCR", showPanel = false) } }
+            setOnClickListener {
+                cancelAutoCollapse()
+                scope.launch { updateOverlayStatus("OCR", showPanel = false) }
+            }
         })
 
         resultPanel?.addView(titleEdit)
         resultPanel?.addView(priceEdit)
+        resultPanel?.addView(decimalButtons)
         resultPanel?.addView(buttons)
         root.addView(ballText)
         root.addView(resultPanel)
@@ -282,14 +313,19 @@ class ScreenCaptureService : Service() {
                     if (kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
                         moved = true
                         params.x = clampOverlayX(startX + dx)
-                        params.y = startY + dy
+                        params.y = clampOverlayY(startY + dy)
                         windowManager?.updateViewLayout(overlayView, params)
                         true
                     } else {
                         false
                     }
                 }
-                MotionEvent.ACTION_UP -> moved
+                MotionEvent.ACTION_UP -> {
+                    if (moved) {
+                        snapOverlayToNearestEdge()
+                    }
+                    moved
+                }
                 else -> false
             }
         }
@@ -302,26 +338,101 @@ class ScreenCaptureService : Service() {
         return x.coerceIn(edgeInset, maxX)
     }
 
+    private fun clampOverlayY(y: Int): Int {
+        val topInset = dp(24)
+        val bottomInset = dp(24)
+        val overlayHeight = overlayView?.height?.takeIf { it > 0 } ?: dp(96)
+        val maxY = (resources.displayMetrics.heightPixels - overlayHeight - bottomInset).coerceAtLeast(topInset)
+        return y.coerceIn(topInset, maxY)
+    }
+
+    private fun snapOverlayToNearestEdge() {
+        val params = overlayParams ?: return
+        overlayView?.post {
+            val width = resources.displayMetrics.widthPixels
+            val overlayWidth = overlayView?.width?.takeIf { it > 0 } ?: dp(96)
+            val edgeInset = dp(24)
+            val leftX = edgeInset
+            val rightX = (width - overlayWidth - edgeInset).coerceAtLeast(edgeInset)
+            val centerX = params.x + overlayWidth / 2
+            params.x = if (centerX < width / 2) leftX else rightX
+            params.y = clampOverlayY(params.y)
+            if (resultPanel?.visibility != View.VISIBLE) {
+                rememberCollapsedOverlayPosition()
+            }
+            runCatching { windowManager?.updateViewLayout(overlayView, params) }
+        }
+    }
+
     private fun keepOverlayInsideGestureArea() {
         val params = overlayParams ?: return
         params.x = clampOverlayX(params.x)
+        params.y = clampOverlayY(params.y)
         runCatching { windowManager?.updateViewLayout(overlayView, params) }
+    }
+
+    private fun rememberCollapsedOverlayPosition() {
+        val params = overlayParams ?: return
+        collapsedOverlayX = params.x
+        collapsedOverlayY = params.y
+    }
+
+    private fun restoreCollapsedOverlayPosition() {
+        val params = overlayParams ?: return
+        val x = collapsedOverlayX
+        val y = collapsedOverlayY
+        if (x != null && y != null) {
+            params.x = clampOverlayX(x)
+            params.y = clampOverlayY(y)
+            runCatching { windowManager?.updateViewLayout(overlayView, params) }
+        }
+        collapsedOverlayX = null
+        collapsedOverlayY = null
+    }
+
+    private fun scheduleAutoCollapse() {
+        cancelAutoCollapse()
+        autoCollapseJob = scope.launch {
+            delay(AUTO_COLLAPSE_MS)
+            updateOverlayStatus("OCR", showPanel = false)
+        }
+    }
+
+    private fun scheduleStatusRestore() {
+        cancelAutoCollapse()
+        autoCollapseJob = scope.launch {
+            delay(AUTO_COLLAPSE_MS)
+            updateOverlayStatus("OCR", showPanel = false)
+        }
+    }
+
+    private fun cancelAutoCollapse() {
+        autoCollapseJob?.cancel()
+        autoCollapseJob = null
     }
 
     private suspend fun showEditableResult(product: DetectedProduct) {
         withContext(Dispatchers.Main) {
+            if (resultPanel?.visibility != View.VISIBLE) {
+                rememberCollapsedOverlayPosition()
+            }
             ballText?.text = formatPrice(product.priceCents)
             titleEdit?.setText(product.title)
             priceEdit?.setText(formatPlainPrice(product.priceCents))
             resultPanel?.visibility = View.VISIBLE
             overlayView?.post { keepOverlayInsideGestureArea() }
         }
+        scheduleAutoCollapse()
     }
 
     private suspend fun updateOverlayStatus(text: String, showPanel: Boolean) {
         withContext(Dispatchers.Main) {
+            val wasPanelVisible = resultPanel?.visibility == View.VISIBLE
             ballText?.text = text
             resultPanel?.visibility = if (showPanel) View.VISIBLE else View.GONE
+            if (wasPanelVisible && !showPanel) {
+                overlayView?.post { restoreCollapsedOverlayPosition() }
+            }
         }
     }
 
@@ -334,6 +445,19 @@ class ScreenCaptureService : Service() {
         val yuan = parts.groupValues[1].toLongOrNull() ?: return null
         val cents = parts.groupValues.getOrNull(2).orEmpty().padEnd(2, '0').take(2).toLongOrNull() ?: 0L
         return (yuan * 100 + cents).takeIf { it in 1..999_999_00 }
+    }
+
+    private fun shiftPriceDecimal(direction: Int) {
+        val current = parsePriceCents(priceEdit?.text?.toString().orEmpty()) ?: return
+        val shifted = when {
+            direction < 0 -> (current / 10).coerceAtLeast(1L)
+            direction > 0 -> current * 10
+            else -> current
+        }.takeIf { it in 1..999_999_00 } ?: return
+
+        priceEdit?.setText(formatPlainPrice(shifted))
+        priceEdit?.setSelection(priceEdit?.text?.length ?: 0)
+        scheduleAutoCollapse()
     }
 
     private fun formatPrice(cents: Long): String =
@@ -381,6 +505,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         worker?.cancel()
+        cancelAutoCollapse()
         overlayView?.let { view ->
             runCatching { windowManager?.removeView(view) }
         }
@@ -398,6 +523,7 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         private const val CHANNEL_ID = "screen_capture"
         private const val NOTIFICATION_ID = 1001
+        private const val AUTO_COLLAPSE_MS = 5_000L
 
         fun startIntent(context: Context, resultCode: Int, data: Intent): Intent =
             Intent(context, ScreenCaptureService::class.java)
