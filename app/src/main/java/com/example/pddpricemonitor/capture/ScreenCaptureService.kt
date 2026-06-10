@@ -1,4 +1,4 @@
-package com.example.pddpricemonitor.capture
+﻿package com.example.pddpricemonitor.capture
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -87,7 +87,12 @@ class ScreenCaptureService : Service() {
     }
 
     private fun startProjection(resultCode: Int, data: Intent) {
-        if (projection != null) return
+        if (projection != null) {
+            if (overlayView == null) {
+                showFloatingBall()
+            }
+            return
+        }
 
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
@@ -210,17 +215,20 @@ class ScreenCaptureService : Service() {
             textSize = 14f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            background = circleBackground(Color.rgb(194, 38, 45))
-            layoutParams = LinearLayout.LayoutParams(dp(72), dp(72))
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            background = circleBackground(Color.rgb(233, 68, 79))
+            elevation = dp(6).toFloat()
+            layoutParams = LinearLayout.LayoutParams(dp(68), dp(68))
             setOnClickListener { captureOnce() }
         }
 
         resultPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             background = roundedBackground(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(dp(270), WindowManager.LayoutParams.WRAP_CONTENT).apply {
+            elevation = dp(8).toFloat()
+            layoutParams = LinearLayout.LayoutParams(dp(292), WindowManager.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(8)
             }
             setOnTouchListener { _, _ ->
@@ -230,11 +238,26 @@ class ScreenCaptureService : Service() {
         }
 
         titleEdit = EditText(this).apply {
-            hint = "Product title"
+            hint = "商品名称"
             minLines = 2
             maxLines = 3
             textSize = 13f
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setOnClickListener {
+                cancelAutoCollapse()
+                showKeyboard(this)
+            }
+            setOnFocusChangeListener { view, hasFocus ->
+                if (hasFocus) {
+                    cancelAutoCollapse()
+                    showKeyboard(view)
+                }
+            }
+        }
+        priceEdit = EditText(this).apply {
+            hint = "价格，例如 185.05"
+            textSize = 16f
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             setOnClickListener {
                 cancelAutoCollapse()
                 showKeyboard(this)
@@ -253,21 +276,6 @@ class ScreenCaptureService : Service() {
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
-        priceEdit = EditText(this).apply {
-            hint = "Price, e.g. 185.05"
-            textSize = 16f
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            setOnClickListener {
-                cancelAutoCollapse()
-                showKeyboard(this)
-            }
-            setOnFocusChangeListener { view, hasFocus ->
-                if (hasFocus) {
-                    cancelAutoCollapse()
-                    showKeyboard(view)
-                }
-            }
-        }
         comparisonText = TextView(this).apply {
             textSize = 13f
             setTextColor(Color.rgb(31, 138, 112))
@@ -281,10 +289,12 @@ class ScreenCaptureService : Service() {
         }
         decimalButtons.addView(Button(this).apply {
             text = "/10"
+            setTextColor(Color.rgb(31, 41, 51))
             setOnClickListener { shiftPriceDecimal(-1) }
         })
         decimalButtons.addView(Button(this).apply {
             text = "x10"
+            setTextColor(Color.rgb(31, 41, 51))
             setOnClickListener { shiftPriceDecimal(1) }
         })
 
@@ -293,11 +303,11 @@ class ScreenCaptureService : Service() {
             gravity = Gravity.END
         }
         buttons.addView(Button(this).apply {
-            text = "Save"
+            text = "保存"
             setOnClickListener { saveEditedProduct() }
         })
         buttons.addView(Button(this).apply {
-            text = "Close"
+            text = "关闭"
             setOnClickListener {
                 cancelAutoCollapse()
                 scope.launch { updateOverlayStatus("OCR", showPanel = false) }
@@ -328,7 +338,12 @@ class ScreenCaptureService : Service() {
         attachDrag(root)
         ballText?.let { attachDrag(it) }
         overlayView = root
-        windowManager?.addView(root, overlayParams)
+        runCatching {
+            windowManager?.addView(root, overlayParams)
+        }.onFailure { error ->
+            overlayView = null
+            MonitorDebugState.update("悬浮球创建失败：${error.javaClass.simpleName}")
+        }
     }
 
     private fun attachDrag(view: View) {
@@ -484,7 +499,6 @@ class ScreenCaptureService : Service() {
             else -> "历史最低 ¥$lowest，本次高 ¥${formatPlainPrice(diff)}"
         } + "；上次价 ¥$previous"
     }
-
     private fun updateComparisonText(currentPriceCents: Long?) {
         val textValue = currentPriceCents?.let { formatComparison(it, currentComparison) }.orEmpty()
         comparisonText?.text = textValue
@@ -563,7 +577,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun formatPrice(cents: Long): String =
-        "CNY ${formatPlainPrice(cents)}"
+        "¥${formatPlainPrice(cents)}"
 
     private fun formatPlainPrice(cents: Long): String =
         "${cents / 100}.${(cents % 100).toString().padStart(2, '0')}"
@@ -579,9 +593,9 @@ class ScreenCaptureService : Service() {
 
     private fun roundedBackground(color: Int): GradientDrawable =
         GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat()
+            cornerRadius = dp(16).toFloat()
             setColor(color)
-            setStroke(dp(1), Color.rgb(210, 210, 210))
+            setStroke(dp(1), Color.rgb(232, 236, 234))
         }
 
     private fun createNotification() =

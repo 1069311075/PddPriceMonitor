@@ -50,6 +50,10 @@ class ProductTextParser {
             "\\u53EA\\u5269\\d*\\u5929|\\u9996\\u4EF6|\\u9650\\u65F6|\\u5927\\u4FC3|" +
             "\\u52A0\\u500D\\u8865|\\u60CA\\u559C\\u7279\\u4EF7)"
     )
+    private val likelyMissingDecimalPriceContextRegex = Regex(
+        "(\\u5238\\u540E|\\u9650\\u65F6|\\u9650\\u91CF\\u4EF7|\\u79D2\\u6740\\u4EF7|" +
+            "\\u6700\\u540E\\d*\\u5206\\u949F|\\u5927\\u4FC3\\u4EF7|\\u60CA\\u559C\\u7279\\u4EF7)"
+    )
     private val detailPageSignalRegex = Regex(
         "(\\u53D1\\u8D77\\u62FC\\u5355|\\u5355\\u72EC\\u8D2D\\u4E70|\\u5BA2\\u670D|" +
             "\\u6536\\u85CF|\\u5E97\\u94FA|100%\\u6B63\\u54C1)"
@@ -61,10 +65,13 @@ class ProductTextParser {
             "\\u4E00\\u5E74\\u8D28\\u4FDD|\\u552E\\u540E|\\u5143\\u8D77)"
     )
     private val titleStartRegex = Regex(
-        "(\\u54C1\\u724C|\\u4E13\\u5356\\u5E97|\\u3010[^\\u3011]{1,12}\\u3011)"
+        "(\\u54C1\\u724C|\\u79D2\\u6740|\\u5B98\\u65B9\\u65D7\\u8230|\\u65D7\\u8230\\u5E97|" +
+            "\\u4E13\\u5356\\u5E97|\\u3010[^\\u3011]{1,12}\\u3011)"
     )
     private val titleStopRegex = Regex(
         "(\\u98DF\\u54C1\\u56DE\\u5934\\u5BA2\\u597D\\u5E97|\\u9632\\u8150\\u5242|" +
+            "\\u9650\\u65F6|\\u7ACB\\u51CF|\\u9884\\u8BA1|\\u73B0\\u4E0B\\u5355|\\u9001\\u8FBE|" +
+            "\\u5E73\\u53F0\\u5238|\\u540E\\u5929\\u8FBE|\\u4ECA\\u5929\\u4E0B\\u5355|" +
             "\\u540C\\u6B3E\\u70ED\\u9500|\\u6700\\u8FD1\\d*\\u6708\\u751F\\u4EA7|" +
             "\\u4F18\\u9009\\u539F|\\u4EBA\\u597D\\u8BC4|\\u7269\\u6D41|" +
             "\\u4EF7\\u683C\\u5B9E\\u60E0|\\u8BE5\\u5E97|\\u8FDE\\u7EED\\d*|" +
@@ -78,11 +85,16 @@ class ProductTextParser {
             "\\u4E13\\u5C5E\\u552E\\u540E|\\u95EA\\u7535\\u9000\\u6362|\\u5546\\u54C1\\u8BE6\\u60C5)"
     )
     private val leadingTitleBadgeRegex = Regex(
-        "^\\s*(\\u54C1\\u724C\\s*[^\\s\\u3010]{1,12}\\s*)?(\\u4E13\\u5356\\u5E97\\s*)?"
+        "^\\s*(\\u767E\\u4EBF\\u8865\\u8D34\\s*)?(\\u79D2\\u6740\\s*)?" +
+            "(618\\s*)?(\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u6536\\u85CF\\s*)?" +
+            "(\\u54C1\\u724C\\s*[^\\s\\u3010]{0,12}\\s*)?(\\u5B98\\u65B9\\u65D7\\u8230\\s*)?" +
+            "(\\u65D7\\u8230\\u5E97\\s*)?(\\u4E13\\u5356\\u5E97\\s*)?"
     )
     private val obviousNonTitleRegex = Regex(
         "(pinduoduo|rmb|cny|intel\\s*\\u7CFB\\u5217|amd\\s*\\u7CFB\\u5217|" +
             "\\u6765\\u81EA|\\u5238\\u540E|\\u5E73\\u53F0\\u5238|\\u53D1\\u8D77\\u62FC\\u5355|" +
+            "\\u9650\\u65F6|\\u7ACB\\u51CF|\\u9884\\u8BA1|\\u73B0\\u4E0B\\u5355|\\u9001\\u8FBE|" +
+            "\\u540E\\u5929\\u8FBE|\\u4ECA\\u5929\\u4E0B\\u5355|" +
             "\\u5373\\u5C06\\u5356\\u5B8C|\\u4EBA\\u60F3\\u62FC|\\u4EBA\\u5728\\u62FC|\\u597D\\u8BC4|" +
             "\\u5929\\u5185|\\u4EBA\\u4E70\\u8FC7|\\u6708\\u9500|\\u4EBA\\u770B\\u8FC7|" +
             "\\u76F4\\u64AD|\\u5206\\u671F|\\u4F4E\\u81F3|\\u5E73\\u53F0\\u5238|" +
@@ -142,8 +154,10 @@ class ProductTextParser {
     private fun parseByBlackTitle(lines: List<OcrLine>): DetectedProduct? {
         val bottomPrice = findBottomRightPrice(lines) ?: return null
         val priceLine = bottomPrice.line
-        val titleLine = findMainTitleLineAboveBottomBar(lines, priceLine) ?: return null
-        val title = collectTitleFromBlackLines(lines, titleLine) ?: return null
+        val titleLine = findMainTitleLineAboveBottomBar(lines, priceLine)
+        val title = titleLine?.let { collectTitleFromBlackLines(lines, it) }
+            ?: findLooseDetailTitleNearPrice(lines, priceLine)
+            ?: return null
         val normalized = normalizeTitle(title)
         if (normalized.length < 6) return null
 
@@ -176,6 +190,86 @@ class ProductTextParser {
             .filter { it.rect.bottom < priceLine.rect.top }
             .filter { isLooseTitleLine(it) }
             .maxByOrNull { titleLineScore(it, priceLine) }
+    }
+
+    private fun findLooseDetailTitleNearPrice(lines: List<OcrLine>, priceLine: OcrLine): String? {
+        val screenHeight = priceLine.screenHeight.takeIf { it > 0 } ?: return null
+        val minTop = (screenHeight * 0.56).toInt()
+        val maxTop = (screenHeight * 0.75).toInt()
+        val region = lines
+            .filter { it.rect.top in minTop..maxTop }
+            .filter { it.rect.bottom < priceLine.rect.top }
+            .filterNot { isBottomOverlayLine(it) }
+            .filterNot { isTitleStopLine(it.text) }
+            .filterNot { isShopOrGuaranteeLine(it.text) }
+            .filter { extractPriceCents(it.text) == null }
+            .filter { it.text.any { char -> char in '\u4e00'..'\u9fff' || char.isLetter() } }
+            .filter { normalizeTitle(cleanupTitleText(it.text)).length >= 8 }
+
+        val best = region
+            .filter { isLikelyLooseProductTitle(it) }
+            .maxByOrNull { looseDetailTitleScore(it, priceLine) }
+            ?: return null
+        val title = collectLooseTitleBlock(lines, best, priceLine)
+            ?: normalizeDisplayTitle(cleanupTitleText(best.text))
+        return title.takeIf { isLikelyTitle(it) }
+    }
+
+    private fun isLikelyLooseProductTitle(line: OcrLine): Boolean {
+        val cleaned = cleanupTitleText(line.text)
+        val normalized = normalizeTitle(cleaned)
+        if (normalized.length < 10) return false
+        if (isTitleStopLine(cleaned)) return false
+        if (obviousNonTitleRegex.containsMatchIn(cleaned)) return false
+        if (extractPriceCents(cleaned) != null) return false
+
+        val hasBrandOrSpec =
+            titleStartRegex.containsMatchIn(cleaned) ||
+                cleaned.contains('\u3010') ||
+                Regex("(\\d+\\s*(g|kg|ml|l|\\u514B|\\u6BEB\\u5347|\\u5347|\\u679A|\\u888B|\\u74F6)|\\u88C5|\\u888B\\u88C5|\\u74F6\\u88C5)", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(cleaned)
+        val hasEnoughWords = normalized.length >= 16
+        return hasBrandOrSpec || hasEnoughWords
+    }
+
+    private fun looseDetailTitleScore(line: OcrLine, priceLine: OcrLine): Int {
+        val cleaned = cleanupTitleText(line.text)
+        var score = normalizeTitle(cleaned).length * 4
+        if (titleStartRegex.containsMatchIn(line.text)) score += 120
+        if (line.darkRatio >= 0.018) score += 40
+        if (line.redRatio < 0.35) score += 25 else score -= 60
+        if (line.greenRatio < 0.35) score += 25 else score -= 60
+        score += line.rect.height().coerceAtMost(70)
+        score -= (priceLine.rect.top - line.rect.bottom).coerceAtLeast(0) / 25
+        if (obviousNonTitleRegex.containsMatchIn(cleaned)) score -= 160
+        return score
+    }
+
+    private fun collectLooseTitleBlock(lines: List<OcrLine>, seed: OcrLine, priceLine: OcrLine): String? {
+        val nearby = lines
+            .filter { it.rect.top >= seed.rect.top - 80 }
+            .filter { it.rect.top <= seed.rect.top + 150 }
+            .filter { it.rect.bottom < priceLine.rect.top }
+            .filterNot { isBottomOverlayLine(it) }
+            .filterNot { isTitleStopLine(it.text) }
+            .filterNot { isShopOrGuaranteeLine(it.text) }
+            .filter { extractPriceCents(it.text) == null }
+            .sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
+
+        val titleLines = nearby
+            .filter { line ->
+                line == seed ||
+                    (
+                        isTitleLineRelated(seed, line) &&
+                            normalizeTitle(cleanupTitleText(line.text)).length >= 5 &&
+                            !obviousNonTitleRegex.containsMatchIn(cleanupTitleText(line.text))
+                        )
+            }
+            .map { cleanupTitleText(it.text) }
+            .filter { it.isNotBlank() }
+
+        val title = normalizeDisplayTitle(titleLines.joinToString(""))
+        return title.takeIf { isLikelyTitle(it) }
     }
 
     private fun findBottomRightPrice(lines: List<OcrLine>): BottomPrice? {
@@ -221,12 +315,13 @@ class ProductTextParser {
         }
 
         val best = candidates.maxByOrNull { bottomNumberScore(it) } ?: return null
-        val cents = parsePlainPriceText(best.text) ?: return null
+        val cents = parseBottomPriceText(best.line.text, best.text) ?: return null
         return BottomPrice(best.line, cents)
     }
 
     private fun extractBottomBarPriceCents(line: OcrLine): Long? {
         extractPriceCents(line)?.let { return it }
+        extractPriceCentsFromElements(line)?.let { return it }
         val text = line.text
         if (Regex("\\d+\\s*%|100%|\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD").containsMatchIn(text)) {
             return null
@@ -240,9 +335,24 @@ class ProductTextParser {
         }
         return Regex("\\d{1,6}(?:[.,]\\d{1,2})?")
             .findAll(text)
-            .mapNotNull { parsePlainPriceText(it.value) }
+            .mapNotNull { parseBottomPriceText(text, it.value) }
             .filter { it in 1..999_999_00 }
             .maxOrNull()
+    }
+
+    private fun parseBottomPriceText(lineText: String, value: String): Long? {
+        if (value.contains('.') || value.contains(',')) {
+            return parsePlainPriceText(value)
+        }
+        val digits = value.filter(Char::isDigit)
+        if (
+            digits.length in 3..5 &&
+            isSuspiciousMissingDecimal(lineText, digits) &&
+            likelyMissingDecimalPriceContextRegex.containsMatchIn(lineText)
+        ) {
+            return digits.toLongOrNull()
+        }
+        return parsePlainPriceText(value)
     }
 
     private fun parsePlainPriceText(text: String): Long? {
@@ -780,6 +890,7 @@ class ProductTextParser {
 
     private fun cleanupTitleText(text: String): String =
         text.replace(priceRegex, " ")
+            .replace(Regex("^\\s*(618\\s*)?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u6536\\u85CF\\s*[|\\uFF5C]?\\s*"), " ")
             .replace(Regex("\\u54C1\\u724C\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761\\s*[|\\uFF5C]?"), " ")
             .replace(Regex("\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6"), " ")
             .replace(Regex("(\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|\\u964D\\u4EF7\\u8865\\u5DEE|\\u6B63\\u54C1\\u53D1\\u7968|\\u987A\\u4E30\\u5305\\u90AE|\\u540E\\u5929\\u8FBE|24\\u5C0F\\u65F6\\u53D1\\u8D27|\\u4E70\\u8D35\\u53CC\\u500D\\u8D54)"), " ")

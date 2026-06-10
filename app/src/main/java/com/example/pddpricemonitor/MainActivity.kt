@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,9 +26,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -54,18 +57,19 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.pddpricemonitor.capture.MonitorDebugState
-import com.example.pddpricemonitor.capture.PddForegroundState
 import com.example.pddpricemonitor.capture.ScreenCaptureService
 import com.example.pddpricemonitor.data.ProductPrice
 import com.example.pddpricemonitor.data.ProductPriceHistory
@@ -75,11 +79,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val AppBackground = Color(0xFFF5F7F6)
-private val FreshGreen = Color(0xFF1F8A70)
-private val PriceRed = Color(0xFFC43A3A)
-private val SoftGreen = Color(0xFFE6F4EE)
+private val AppBackground = Color(0xFFF7F9FB)
+private val CardWhite = Color(0xFFFFFFFF)
+private val FreshGreen = Color(0xFF23A26D)
+private val SoftGreen = Color(0xFFE8F7EF)
+private val BrandRed = Color(0xFFE9444F)
+private val PriceRed = Color(0xFFE53935)
 private val DeleteRed = Color(0xFFE05252)
+private val TextPrimary = Color(0xFF1F2933)
+private val TextSecondary = Color(0xFF7B8794)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,6 +124,7 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
     var expandedProductId by rememberSaveable { mutableStateOf<Long?>(null) }
     var pendingDelete by remember { mutableStateOf<ProductPrice?>(null) }
     var clearConfirmStep by rememberSaveable { mutableStateOf(0) }
+    var fullScreenList by rememberSaveable { mutableStateOf(false) }
 
     val filteredProducts = remember(products, searchQuery) {
         val query = searchQuery.trim()
@@ -129,6 +138,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
             }
         }
     }
+    val todayCount = remember(products) { products.count { isToday(it.updatedAt) } }
+    val updatedCount = remember(products) { products.count { it.updatedAt > it.firstSeenAt } }
 
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -214,74 +225,62 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 18.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
-        Header(
-            captureStarted = captureStarted,
-            onStartCapture = {
-                if (Settings.canDrawOverlays(context)) {
-                    projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
-                } else {
-                    context.startActivity(
-                        Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                    )
-                }
-            },
-            onClearHistory = { clearConfirmStep = 1 },
-            onOpenPdd = { openPdd(context) },
-            debugMessage = debugInfo.message,
-            debugTextLength = debugInfo.lastOcrTextLength,
-            debugParsedProducts = debugInfo.lastParsedProducts,
-            debugSavedProducts = debugInfo.lastSavedProducts,
-            debugUpdatedAt = debugInfo.updatedAt
+        TopBar(
+            fullScreenList = fullScreenList,
+            onToggleFullScreen = { fullScreenList = !fullScreenList }
         )
 
-        Spacer(modifier = Modifier.height(14.dp))
-
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            label = { Text("搜索商品") },
-            placeholder = { Text("输入品牌、型号或关键词") },
-            trailingIcon = {
-                if (searchQuery.isNotBlank()) {
-                    TextButton(onClick = { searchQuery = "" }) {
-                        Text("清除")
-                    }
-                }
+        AnimatedVisibility(visible = !fullScreenList) {
+            Column {
+                Spacer(modifier = Modifier.height(12.dp))
+                OcrStatusPill(captureStarted = captureStarted)
+                Spacer(modifier = Modifier.height(14.dp))
+                OcrStartCard(
+                    onStartCapture = {
+                        if (Settings.canDrawOverlays(context)) {
+                            projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+                        } else {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                )
+                            )
+                        }
+                    },
+                    debugMessage = debugInfo.message
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                StatCards(
+                    todayCount = todayCount,
+                    productCount = products.size,
+                    updatedCount = updatedCount
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                SearchBox(
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it }
+                )
             }
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "价格记录",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "${filteredProducts.size}/${products.size} 件",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
+
+        Spacer(modifier = Modifier.height(if (fullScreenList) 8.dp else 14.dp))
+
+        SectionHeader(
+            fullScreenList = fullScreenList,
+            filteredCount = filteredProducts.size,
+            totalCount = products.size,
+            onToggleFullScreen = { fullScreenList = !fullScreenList },
+            onClearHistory = { clearConfirmStep = 1 }
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (filteredProducts.isEmpty()) {
                 item {
@@ -304,15 +303,11 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(DeleteRed, RoundedCornerShape(12.dp))
+                                .background(DeleteRed, RoundedCornerShape(14.dp))
                                 .padding(horizontal = 20.dp),
                             contentAlignment = Alignment.CenterEnd
                         ) {
-                            Text(
-                                text = "删除",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Text("删除", color = Color.White, fontWeight = FontWeight.Bold)
                         }
                     }
                 ) {
@@ -331,64 +326,213 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
 }
 
 @Composable
-private fun Header(
-    captureStarted: Boolean,
+private fun TopBar(
+    fullScreenList: Boolean,
+    onToggleFullScreen: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Spacer(modifier = Modifier.width(34.dp))
+        Text(
+            text = if (fullScreenList) "商品价格" else "拼多多价格助手",
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        TextButton(onClick = onToggleFullScreen) {
+            Text(if (fullScreenList) "返回" else "全屏")
+        }
+    }
+}
+
+@Composable
+private fun OcrStatusPill(captureStarted: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Row(
+            modifier = Modifier
+                .background(SoftGreen, RoundedCornerShape(50))
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(if (captureStarted) FreshGreen else TextSecondary)
+            )
+            Spacer(modifier = Modifier.width(7.dp))
+            Text(
+                text = if (captureStarted) "OCR 已就绪" else "等待启动 OCR",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = FreshGreen
+            )
+        }
+    }
+}
+
+@Composable
+private fun OcrStartCard(
     onStartCapture: () -> Unit,
-    onClearHistory: () -> Unit,
-    onOpenPdd: () -> Unit,
-    debugMessage: String,
-    debugTextLength: Int,
-    debugParsedProducts: Int,
-    debugSavedProducts: Int,
-    debugUpdatedAt: Long
+    debugMessage: String
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onStartCapture),
+        colors = CardDefaults.cardColors(containerColor = BrandRed),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "启动 OCR 识别",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "去拼多多商品页，点击悬浮球识别价格",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.92f)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = onStartCapture,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.White,
+                    contentColor = BrandRed
+                )
+            ) {
+                Text("启动悬浮球")
+            }
+            if (debugMessage.isNotBlank()) {
+                Text(
+                    text = debugMessage,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.72f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatCards(
+    todayCount: Int,
+    productCount: Int,
+    updatedCount: Int
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        StatCard(title = "今日记录", value = "$todayCount 件")
+        StatCard(title = "历史商品", value = "$productCount 件")
+        StatCard(title = "最低价更新", value = "$updatedCount 件")
+    }
+}
+
+@Composable
+private fun RowScope.StatCard(title: String, value: String) {
+    Card(
+        modifier = Modifier.weight(1f),
+        colors = CardDefaults.cardColors(containerColor = CardWhite),
+        shape = RoundedCornerShape(12.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "拼多多价格助手",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                text = title,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
             )
+            Spacer(modifier = Modifier.height(5.dp))
             Text(
-                text = if (captureStarted) "悬浮球已准备，去拼多多点击 OCR 小球即可保存价格" else "等待开启悬浮球权限",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                text = value,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onStartCapture,
-                    colors = ButtonDefaults.buttonColors(containerColor = FreshGreen)
-                ) {
-                    Text("启动")
-                }
-                TextButton(onClick = onOpenPdd) {
-                    Text("打开拼多多")
-                }
-                TextButton(onClick = onClearHistory) {
-                    Text("清空")
+        }
+    }
+}
+
+@Composable
+private fun SearchBox(
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit
+) {
+    OutlinedTextField(
+        value = searchQuery,
+        onValueChange = onSearchQueryChange,
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp),
+        label = { Text("搜索商品") },
+        placeholder = { Text("名称 / 型号 / 关键词") },
+        trailingIcon = {
+            if (searchQuery.isNotBlank()) {
+                TextButton(onClick = { onSearchQueryChange("") }) {
+                    Text("清除")
                 }
             }
-            Text(
-                text = "最近：$debugMessage | 文字：$debugTextLength | 解析：$debugParsedProducts | 保存：$debugSavedProducts",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            if (debugUpdatedAt > 0L) {
-                Text(
-                    text = "更新时间：${formatTime(debugUpdatedAt)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+        }
+    )
+}
+
+@Composable
+private fun SectionHeader(
+    fullScreenList: Boolean,
+    filteredCount: Int,
+    totalCount: Int,
+    onToggleFullScreen: () -> Unit,
+    onClearHistory: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = if (fullScreenList) "全部商品" else "最近扫描",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "$filteredCount/$totalCount",
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        TextButton(onClick = onToggleFullScreen) {
+            Text(if (fullScreenList) "退出全屏" else "查看更多")
+        }
+        TextButton(onClick = onClearHistory) {
+            Text("清空")
         }
     }
 }
@@ -397,14 +541,14 @@ private fun Header(
 private fun EmptyState(searchQuery: String) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = RoundedCornerShape(16.dp)
+        colors = CardDefaults.cardColors(containerColor = CardWhite),
+        shape = RoundedCornerShape(14.dp)
     ) {
         Text(
             text = if (searchQuery.isBlank()) "还没有保存商品，先去拼多多点悬浮球识别一次。" else "没有找到匹配的商品。",
             modifier = Modifier.padding(18.dp),
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = TextSecondary
         )
     }
 }
@@ -424,41 +568,44 @@ private fun ProductCard(
             .fillMaxWidth()
             .animateContentSize()
             .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = CardWhite),
         shape = RoundedCornerShape(14.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary,
+                maxLines = if (expanded) 8 else 3,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Bottom
+            ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = item.title,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = if (expanded) 4 else 2,
-                        overflow = TextOverflow.Ellipsis
+                        text = "当前 ${formatPrice(item.priceCents)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "更新于 ${formatTime(item.updatedAt)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = formatPrice(item.priceCents),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = PriceRed
-                    )
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "最低 ${formatPrice(minPrice)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = FreshGreen
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = FreshGreen,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
+                Text(
+                    text = "${history.size} 条 · ${shortTime(item.updatedAt)}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary
+                )
             }
 
             if (expanded) {
@@ -497,7 +644,8 @@ private fun ProductHistoryDetail(
     Text(
         text = "历史明细",
         style = MaterialTheme.typography.bodyMedium,
-        fontWeight = FontWeight.SemiBold
+        fontWeight = FontWeight.SemiBold,
+        color = TextPrimary
     )
     Spacer(modifier = Modifier.height(6.dp))
 
@@ -513,13 +661,13 @@ private fun ProductHistoryDetail(
                 text = formatTime(record.recordedAt),
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = TextSecondary
             )
             Text(
                 text = formatPrice(record.priceCents),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = if (record.priceCents == minPrice) FreshGreen else MaterialTheme.colorScheme.onSurface
+                color = if (record.priceCents == minPrice) FreshGreen else TextPrimary
             )
         }
         if (index != recentHistory.lastIndex) {
@@ -539,7 +687,7 @@ private fun RowScope.StatPill(label: String, value: String) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = TextSecondary
         )
         Text(
             text = value,
@@ -615,7 +763,7 @@ private fun PriceLineChart(
                 text = "仅 1 条记录，继续保存后会形成走势",
                 modifier = Modifier.align(Alignment.BottomCenter),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = TextSecondary
             )
         }
     }
@@ -627,18 +775,15 @@ private fun formatPrice(cents: Long): String =
 private fun formatTime(timeMillis: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(Date(timeMillis))
 
+private fun shortTime(timeMillis: Long): String =
+    SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(timeMillis))
+
+private fun isToday(timeMillis: Long): Boolean {
+    val dayFormat = SimpleDateFormat("yyyyMMdd", Locale.CHINA)
+    return dayFormat.format(Date(timeMillis)) == dayFormat.format(Date())
+}
+
 private fun normalizeSearchText(text: String): String =
     text.lowercase()
         .replace(Regex("[^\\p{IsHan}a-z0-9]+"), "")
         .trim()
-
-private fun openPdd(context: Context) {
-    val launchIntent = context.packageManager.getLaunchIntentForPackage(PddForegroundState.PDD_PACKAGE_NAME)
-    if (launchIntent != null) {
-        context.startActivity(launchIntent)
-    } else {
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${PddForegroundState.PDD_PACKAGE_NAME}"))
-        )
-    }
-}
