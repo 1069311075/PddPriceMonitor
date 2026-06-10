@@ -9,6 +9,7 @@ class ProductTextParser {
         val text: String,
         val rect: Rect,
         val darkRatio: Double,
+        val lightRatio: Double,
         val redRatio: Double,
         val greenRatio: Double,
         val screenHeight: Int,
@@ -71,7 +72,10 @@ class ProductTextParser {
             "\\u7ACB\\u5373\\u53C2\\u4E0E\\u4E07\\u4EBA\\u56E2|" +
             "\\u6B63\\u54C1\\u9669|\\u6B63\\u54C1\\u4FDD\\u969C|" +
             "\\u4E2D\\u56FD\\u4EBA\\u5BFF|\\u627F\\u4FDD|\\u7B2C\\d+\\u540D|" +
-            "\\u9500\\u699C|\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39)"
+            "\\u9500\\u699C|\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|" +
+            "\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C\\u5546\\u54C1|\\u70ED\\u9500\\u77E5\\u540D\\u54C1\\u724C|" +
+            "\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500|\\u5E97\\u94FA\\u4FDD\\u969C|" +
+            "\\u4E13\\u5C5E\\u552E\\u540E|\\u95EA\\u7535\\u9000\\u6362|\\u5546\\u54C1\\u8BE6\\u60C5)"
     )
     private val leadingTitleBadgeRegex = Regex(
         "^\\s*(\\u54C1\\u724C\\s*[^\\s\\u3010]{1,12}\\s*)?(\\u4E13\\u5356\\u5E97\\s*)?"
@@ -82,7 +86,9 @@ class ProductTextParser {
             "\\u5373\\u5C06\\u5356\\u5B8C|\\u4EBA\\u60F3\\u62FC|\\u4EBA\\u5728\\u62FC|\\u597D\\u8BC4|" +
             "\\u5929\\u5185|\\u4EBA\\u4E70\\u8FC7|\\u6708\\u9500|\\u4EBA\\u770B\\u8FC7|" +
             "\\u76F4\\u64AD|\\u5206\\u671F|\\u4F4E\\u81F3|\\u5E73\\u53F0\\u5238|" +
-            "\\u53C2\\u6570|\\u9891\\u7387|mhz|gbps|gddr|\\u4F4D\\u5BBD|\\u7535\\u6E90)",
+            "\\u53C2\\u6570|\\u9891\\u7387|mhz|gbps|gddr|\\u4F4D\\u5BBD|\\u7535\\u6E90|" +
+            "\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C\\u5546\\u54C1|\\u70ED\\u9500\\u77E5\\u540D\\u54C1\\u724C|" +
+            "\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500|\\u5546\\u54C1\\u8BE6\\u60C5)",
         RegexOption.IGNORE_CASE
     )
     private val titleNoiseRegex = Regex(
@@ -113,6 +119,7 @@ class ProductTextParser {
                         it,
                         rect,
                         color.darkRatio,
+                        color.lightRatio,
                         color.redRatio,
                         color.greenRatio,
                         bitmap?.height ?: 0,
@@ -162,8 +169,10 @@ class ProductTextParser {
 
     private fun findMainTitleLineAboveBottomBar(lines: List<OcrLine>, priceLine: OcrLine): OcrLine? {
         val screenHeight = priceLine.screenHeight.takeIf { it > 0 } ?: return null
+        val minTop = (screenHeight * 0.46).toInt()
+        val maxTop = (screenHeight * 0.76).toInt()
         return lines
-            .filter { it.rect.top in (screenHeight * 0.42).toInt()..(screenHeight * 0.78).toInt() }
+            .filter { it.rect.top in minTop..maxTop }
             .filter { it.rect.bottom < priceLine.rect.top }
             .filter { isLooseTitleLine(it) }
             .maxByOrNull { titleLineScore(it, priceLine) }
@@ -274,26 +283,34 @@ class ProductTextParser {
     }
 
     private fun collectTitleFromBlackLines(lines: List<OcrLine>, firstLine: OcrLine): String? {
-        val titleLines = mutableListOf<String>()
-        var previousBottom = firstLine.rect.bottom
-
-        lines
-            .filter { it.rect.top >= firstLine.rect.top }
-            .filter { it.rect.top <= firstLine.rect.top + 180 }
+        val nearby = lines
+            .filter { it.rect.top >= firstLine.rect.top - 130 }
+            .filter { it.rect.top <= firstLine.rect.top + 220 }
             .filterNot { isBottomOverlayLine(it) }
-            .forEach { line ->
-                if (titleLines.isNotEmpty() && line.rect.top - previousBottom > 95) return@forEach
-                if (titleLines.isNotEmpty() && !isHorizontallyAligned(firstLine, line)) return@forEach
-                if (!isStrictTitleContinuation(firstLine, line)) return@forEach
+            .sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
 
-                val cleaned = cleanupTitleText(line.text)
-                if (cleaned.isNotBlank()) {
-                    titleLines += cleaned
-                    previousBottom = line.rect.bottom
-                }
-            }
+        val index = nearby.indexOfFirst { it == firstLine }.takeIf { it >= 0 } ?: return null
+        val titleLines = mutableListOf(firstLine)
 
-        val title = normalizeDisplayTitle(titleLines.joinToString(""))
+        var previousTop = firstLine.rect.top
+        for (i in index - 1 downTo 0) {
+            val line = nearby[i]
+            if (previousTop - line.rect.bottom > 90) break
+            if (!isStrictTitleContinuation(firstLine, line)) break
+            titleLines.add(0, line)
+            previousTop = line.rect.top
+        }
+
+        var previousBottom = firstLine.rect.bottom
+        for (i in index + 1 until nearby.size) {
+            val line = nearby[i]
+            if (line.rect.top - previousBottom > 90) break
+            if (!isStrictTitleContinuation(firstLine, line)) break
+            titleLines += line
+            previousBottom = line.rect.bottom
+        }
+
+        val title = normalizeDisplayTitle(titleLines.joinToString("") { cleanupTitleText(it.text) })
         return title.takeIf { isLikelyTitle(it) }
     }
 
@@ -430,17 +447,25 @@ class ProductTextParser {
             !obviousNonTitleRegex.containsMatchIn(cleaned) &&
             extractPriceCents(cleaned) == null &&
             cleaned.any { it in '\u4e00'..'\u9fff' || it.isLetter() } &&
-            line.redRatio < 0.35
+            line.redRatio < 0.18 &&
+            line.greenRatio < 0.16 &&
+            !isDarkBackgroundLine(line) &&
+            (isBlackTitleLine(line) || isWeakBlackTitleLine(line))
     }
 
     private fun titleLineScore(line: OcrLine, priceLine: OcrLine): Int {
         val cleaned = cleanupTitleText(line.text)
         val compactLength = normalizeTitle(cleaned).length
         var score = compactLength * 3
-        if (isBlackTitleLine(line)) score += 80
-        if (line.darkRatio >= 0.03) score += 35
-        if (line.redRatio < 0.12) score += 20
-        if (line.greenRatio < 0.12) score += 15
+        when {
+            isBlackTitleLine(line) -> score += 260
+            isWeakBlackTitleLine(line) -> score += 55
+            else -> score -= 160
+        }
+        if (line.darkRatio >= 0.055) score += 70
+        if (line.lightRatio >= 0.38) score += 55 else score -= 85
+        if (line.redRatio < 0.08) score += 35 else score -= 70
+        if (line.greenRatio < 0.08) score += 35 else score -= 70
         score += line.rect.height().coerceAtMost(80)
 
         val distance = (priceLine.rect.top - line.rect.bottom).coerceAtLeast(0)
@@ -457,8 +482,8 @@ class ProductTextParser {
         if (!isLooseTitleLine(line)) return false
         if (line == firstLine) return true
         if (!isHorizontallyAligned(firstLine, line)) return false
-        if (line.greenRatio >= 0.16 || line.redRatio >= 0.24) return false
-        return isBlackTitleLine(line) || normalizeTitle(cleanupTitleText(line.text)).length >= 10
+        if (line.greenRatio >= 0.12 || line.redRatio >= 0.14) return false
+        return isBlackTitleLine(line)
     }
 
     private fun isHorizontallyAligned(first: OcrLine, next: OcrLine): Boolean {
@@ -617,13 +642,30 @@ class ProductTextParser {
         return (yuan * 100 + cents).takeIf { it in 100..999_999_00 }
     }
 
-    private fun isBlackTitleLine(line: OcrLine): Boolean =
-        line.redRatio < 0.22 &&
-            line.greenRatio < 0.18 &&
+    private fun isBlackTitleLine(line: OcrLine): Boolean {
+        val compactLength = normalizeTitle(cleanupTitleText(line.text)).length
+        return line.redRatio < 0.13 &&
+            line.greenRatio < 0.11 &&
+            line.lightRatio >= 0.30 &&
+            line.darkRatio <= 0.42 &&
             (
-                line.darkRatio >= 0.035 ||
-                    (line.darkRatio >= 0.018 && normalizeTitle(cleanupTitleText(line.text)).length >= 12)
+                line.darkRatio >= 0.045 ||
+                    (line.darkRatio >= 0.032 && compactLength >= 12)
                 )
+    }
+
+    private fun isWeakBlackTitleLine(line: OcrLine): Boolean {
+        val compactLength = normalizeTitle(cleanupTitleText(line.text)).length
+        return compactLength >= 12 &&
+            line.redRatio < 0.18 &&
+            line.greenRatio < 0.16 &&
+            line.lightRatio >= 0.24 &&
+            line.darkRatio <= 0.38 &&
+            line.darkRatio >= 0.024
+    }
+
+    private fun isDarkBackgroundLine(line: OcrLine): Boolean =
+        line.darkRatio > 0.42 && line.lightRatio < 0.28
 
     private fun isBottomOverlayLine(line: OcrLine): Boolean =
         line.screenHeight > 0 && line.rect.top > line.screenHeight * 0.82
@@ -716,12 +758,13 @@ class ProductTextParser {
 
     private data class ColorSample(
         val darkRatio: Double,
+        val lightRatio: Double,
         val redRatio: Double,
         val greenRatio: Double
     )
 
     private fun sampleTextColor(bitmap: Bitmap?, rect: Rect): ColorSample {
-        if (bitmap == null || rect.isEmpty) return ColorSample(1.0, 0.0, 0.0)
+        if (bitmap == null || rect.isEmpty) return ColorSample(0.08, 0.65, 0.0, 0.0)
 
         val left = rect.left.coerceIn(0, bitmap.width - 1)
         val right = rect.right.coerceIn(left + 1, bitmap.width)
@@ -731,6 +774,7 @@ class ProductTextParser {
 
         var total = 0
         var dark = 0
+        var light = 0
         var red = 0
         var green = 0
 
@@ -745,6 +789,7 @@ class ProductTextParser {
                 val luminance = (0.299 * r + 0.587 * g + 0.114 * b)
 
                 if (luminance < 110) dark++
+                if (luminance > 205) light++
                 if (r > 150 && g < 120 && b < 120) red++
                 if (g > 130 && r < 140 && b < 140) green++
                 total++
@@ -753,9 +798,10 @@ class ProductTextParser {
             y += step
         }
 
-        if (total == 0) return ColorSample(1.0, 0.0, 0.0)
+        if (total == 0) return ColorSample(0.08, 0.65, 0.0, 0.0)
         return ColorSample(
             darkRatio = dark.toDouble() / total,
+            lightRatio = light.toDouble() / total,
             redRatio = red.toDouble() / total,
             greenRatio = green.toDouble() / total
         )
