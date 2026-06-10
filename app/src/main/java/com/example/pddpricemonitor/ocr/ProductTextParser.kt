@@ -295,8 +295,8 @@ class ProductTextParser {
         var previousTop = firstLine.rect.top
         for (i in index - 1 downTo 0) {
             val line = nearby[i]
-            if (previousTop - line.rect.bottom > 90) break
-            if (!isStrictTitleContinuation(firstLine, line)) break
+            if (previousTop - line.rect.bottom > 120) break
+            if (!isPreviousTitleContinuation(firstLine, line)) break
             titleLines.add(0, line)
             previousTop = line.rect.top
         }
@@ -304,8 +304,8 @@ class ProductTextParser {
         var previousBottom = firstLine.rect.bottom
         for (i in index + 1 until nearby.size) {
             val line = nearby[i]
-            if (line.rect.top - previousBottom > 90) break
-            if (!isStrictTitleContinuation(firstLine, line)) break
+            if (line.rect.top - previousBottom > 120) break
+            if (!isNextTitleContinuation(firstLine, line)) break
             titleLines += line
             previousBottom = line.rect.bottom
         }
@@ -481,14 +481,68 @@ class ProductTextParser {
     private fun isStrictTitleContinuation(firstLine: OcrLine, line: OcrLine): Boolean {
         if (!isLooseTitleLine(line)) return false
         if (line == firstLine) return true
-        if (!isHorizontallyAligned(firstLine, line)) return false
+        if (!isTitleLineRelated(firstLine, line)) return false
         if (line.greenRatio >= 0.12 || line.redRatio >= 0.14) return false
         return isBlackTitleLine(line)
+    }
+
+    private fun isPreviousTitleContinuation(firstLine: OcrLine, line: OcrLine): Boolean {
+        val cleaned = cleanupTitleText(line.text)
+        val compact = normalizeTitle(cleaned)
+        val hasTitlePrefix = titleStartRegex.containsMatchIn(cleaned) || cleaned.contains('\u3010')
+        if (compact.length < 6) return false
+        if (isTitleStopLine(cleaned)) return false
+        if (isShopOrGuaranteeLine(cleaned) && !hasTitlePrefix) return false
+        if (obviousNonTitleRegex.containsMatchIn(cleaned)) return false
+        if (extractPriceCents(cleaned) != null) return false
+        if (!cleaned.any { it in '\u4e00'..'\u9fff' || it.isLetter() }) return false
+        if (!isTitleLineRelated(firstLine, line)) return false
+
+        val colorLooksTitle =
+            isBlackTitleLine(line) ||
+                isWeakBlackTitleLine(line) ||
+                (
+                    hasTitlePrefix &&
+                        !isDarkBackgroundLine(line) &&
+                        line.redRatio < 0.35 &&
+                        line.greenRatio < 0.24
+                    )
+
+        return colorLooksTitle
+    }
+
+    private fun isNextTitleContinuation(firstLine: OcrLine, line: OcrLine): Boolean {
+        val cleaned = cleanupTitleText(line.text)
+        val compact = normalizeTitle(cleaned)
+        if (compact.length < 6) return false
+        if (isTitleStopLine(cleaned)) return false
+        if (isShopOrGuaranteeLine(cleaned)) return false
+        if (obviousNonTitleRegex.containsMatchIn(cleaned)) return false
+        if (extractPriceCents(cleaned) != null) return false
+        if (!cleaned.any { it in '\u4e00'..'\u9fff' || it.isLetter() }) return false
+        if (!isTitleLineRelated(firstLine, line)) return false
+        if (isDarkBackgroundLine(line)) return false
+
+        return isBlackTitleLine(line) ||
+            isWeakBlackTitleLine(line) ||
+            (
+                compact.length >= 10 &&
+                    line.redRatio < 0.26 &&
+                    line.greenRatio < 0.34 &&
+                    line.lightRatio >= 0.18
+                )
     }
 
     private fun isHorizontallyAligned(first: OcrLine, next: OcrLine): Boolean {
         val tolerance = (first.screenWidth * 0.12).toInt().coerceAtLeast(80)
         return kotlin.math.abs(first.rect.left - next.rect.left) <= tolerance
+    }
+
+    private fun isTitleLineRelated(first: OcrLine, next: OcrLine): Boolean {
+        if (isHorizontallyAligned(first, next)) return true
+        val overlap = minOf(first.rect.right, next.rect.right) - maxOf(first.rect.left, next.rect.left)
+        val minWidth = minOf(first.rect.width(), next.rect.width()).coerceAtLeast(1)
+        return overlap > minWidth * 0.45
     }
 
     private fun findTitleBelowPrice(lines: List<OcrLine>, priceLine: OcrLine): String? {
@@ -713,6 +767,9 @@ class ProductTextParser {
 
     private fun cleanupTitleText(text: String): String =
         text.replace(priceRegex, " ")
+            .replace(Regex("\\u54C1\\u724C\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761\\s*[|\\uFF5C]?"), " ")
+            .replace(Regex("\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6"), " ")
+            .replace(Regex("(\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|\\u964D\\u4EF7\\u8865\\u5DEE|\\u6B63\\u54C1\\u53D1\\u7968|\\u987A\\u4E30\\u5305\\u90AE|\\u540E\\u5929\\u8FBE|24\\u5C0F\\u65F6\\u53D1\\u8D27|\\u4E70\\u8D35\\u53CC\\u500D\\u8D54)"), " ")
             .replace(Regex("[\\[\\]{}()\\uFF08\\uFF09|]+"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()

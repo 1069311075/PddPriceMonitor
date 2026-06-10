@@ -14,7 +14,7 @@ android {
     defaultConfig {
         applicationId = "com.example.pddpricemonitor"
         minSdk = 29
-        targetSdk = 35
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
     }
@@ -51,6 +51,6 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition-chinese:16.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
