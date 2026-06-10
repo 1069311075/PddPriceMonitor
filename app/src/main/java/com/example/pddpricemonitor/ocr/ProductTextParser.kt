@@ -180,12 +180,13 @@ class ProductTextParser {
 
     private fun findBottomRightPrice(lines: List<OcrLine>): BottomPrice? {
         val sample = lines.firstOrNull { it.screenHeight > 0 && it.screenWidth > 0 } ?: return null
-        val minTop = (sample.screenHeight * 0.82).toInt()
-        val minLeft = (sample.screenWidth * 0.40).toInt()
+        val minTop = (sample.screenHeight * 0.89).toInt()
+        val minLeft = (sample.screenWidth * 0.48).toInt()
         val linePrice = lines
-            .filter { it.rect.top >= minTop || it.rect.bottom >= sample.screenHeight * 0.90 }
+            .filter { it.rect.top >= minTop || it.rect.bottom >= sample.screenHeight * 0.94 }
             .filter { it.rect.right >= minLeft }
             .filterNot { isBadPriceContext(it.text) }
+            .filterNot { isForbiddenBottomNumberContext(it.text) }
             .mapNotNull { line ->
                 val cents = extractBottomBarPriceCents(line) ?: return@mapNotNull null
                 BottomPrice(line, cents)
@@ -197,9 +198,17 @@ class ProductTextParser {
 
     private fun findBottomRightPriceFromElements(lines: List<OcrLine>, minTop: Int, minLeft: Int): BottomPrice? {
         val bottomLines = lines
-            .filter { it.rect.top >= minTop || it.rect.bottom >= it.screenHeight * 0.90 }
+            .filter { it.rect.top >= minTop || it.rect.bottom >= it.screenHeight * 0.94 }
             .filter { it.rect.right >= minLeft }
             .filterNot { isForbiddenBottomNumberContext(it.text) }
+
+        val explicitLinePrice = bottomLines
+            .mapNotNull { line ->
+                val cents = extractBottomBarPriceCents(line) ?: return@mapNotNull null
+                BottomPrice(line, cents)
+            }
+            .maxByOrNull { bottomPriceLineScore(it.line) }
+        if (explicitLinePrice != null) return explicitLinePrice
 
         val candidates = bottomLines.flatMap { line ->
             line.elements.flatMap { element ->
@@ -232,7 +241,7 @@ class ProductTextParser {
         return Regex("\\d{1,6}(?:[.,]\\d{1,2})?")
             .findAll(text)
             .mapNotNull { parsePlainPriceText(it.value) }
-            .filter { it in 100..999_999_00 }
+            .filter { it in 1..999_999_00 }
             .maxOrNull()
     }
 
@@ -246,15 +255,19 @@ class ProductTextParser {
 
     private fun isForbiddenBottomNumber(text: String, elementText: String, lineText: String): Boolean {
         val yuan = text.substringBefore('.').substringBefore(',').toLongOrNull() ?: return true
-        if (yuan == 100L) return true
-        if (Regex("\\d+\\s*%|100%|\\d{1,2}:\\d{2}").containsMatchIn(elementText)) return true
+        if (yuan == 100L || yuan == 618L) return true
+        if (!text.contains('.') && !text.contains(',') && Regex("[\\u00A5\\uFFE5]\\s*0[.,]\\d{1,2}").containsMatchIn(lineText)) return true
+        if (Regex("\\d+\\s*%|100%|\\d{1,2}:\\d{2}|618").containsMatchIn(elementText)) return true
         if (isForbiddenBottomNumberContext(lineText)) return true
         if (Regex("(\\u4EBA|\\u4EF6|\\u5DF2\\u552E|\\u9500\\u91CF|\\u5269\\u4F59|\\u5012\\u8BA1\\u65F6)").containsMatchIn(lineText)) return true
         return yuan !in 1..999_999
     }
 
     private fun isForbiddenBottomNumberContext(text: String): Boolean =
-        Regex("\\d+\\s*%|100%|\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD").containsMatchIn(text)
+        Regex(
+            "\\d+\\s*%|100%|618|\\u767E\\u4EBF\\u8865\\u8D34|\\u4F18\\u60E0|" +
+                "\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD|\\u70ED\\u5356|\\u8BC4\\u4EF7"
+        ).containsMatchIn(text)
 
     private fun bottomNumberScore(number: BottomNumber): Int {
         var score = 0
@@ -617,7 +630,7 @@ class ProductTextParser {
                 val cents = decimalText.padEnd(2, '0').take(2).toLongOrNull() ?: return@mapNotNull null
                 yuan * 100 + cents
             }
-            .filter { it in 100..999_999_00 }
+            .filter { it in 1..999_999_00 }
             .minOrNull()
 
     private fun extractPriceCents(text: String): Long? =
@@ -632,7 +645,7 @@ class ProductTextParser {
                 val cents = centsText.toLongOrNull() ?: 0L
                 yuan * 100 + cents
             }
-            .filter { it in 100..999_999_00 }
+            .filter { it in 1..999_999_00 }
             .minOrNull()
 
     private fun extractPriceCentsFromElements(line: OcrLine): Long? {
@@ -693,7 +706,7 @@ class ProductTextParser {
 
         val yuan = mainDigits.toLongOrNull() ?: return null
         val cents = decimalDigits.padEnd(2, '0').take(2).toLongOrNull() ?: 0L
-        return (yuan * 100 + cents).takeIf { it in 100..999_999_00 }
+        return (yuan * 100 + cents).takeIf { it in 1..999_999_00 }
     }
 
     private fun isBlackTitleLine(line: OcrLine): Boolean {

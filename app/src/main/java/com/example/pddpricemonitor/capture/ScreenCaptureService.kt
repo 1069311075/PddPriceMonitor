@@ -243,11 +243,12 @@ class ScreenCaptureService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(18)
+            x = (resources.displayMetrics.widthPixels - dp(96)).coerceAtLeast(dp(24))
             y = dp(220)
         }
 
@@ -280,7 +281,7 @@ class ScreenCaptureService : Service() {
                     val dy = (event.rawY - downRawY).toInt()
                     if (kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
                         moved = true
-                        params.x = startX + dx
+                        params.x = clampOverlayX(startX + dx)
                         params.y = startY + dy
                         windowManager?.updateViewLayout(overlayView, params)
                         true
@@ -294,12 +295,26 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun clampOverlayX(x: Int): Int {
+        val edgeInset = dp(24)
+        val overlayWidth = overlayView?.width?.takeIf { it > 0 } ?: dp(96)
+        val maxX = (resources.displayMetrics.widthPixels - overlayWidth - edgeInset).coerceAtLeast(edgeInset)
+        return x.coerceIn(edgeInset, maxX)
+    }
+
+    private fun keepOverlayInsideGestureArea() {
+        val params = overlayParams ?: return
+        params.x = clampOverlayX(params.x)
+        runCatching { windowManager?.updateViewLayout(overlayView, params) }
+    }
+
     private suspend fun showEditableResult(product: DetectedProduct) {
         withContext(Dispatchers.Main) {
             ballText?.text = formatPrice(product.priceCents)
             titleEdit?.setText(product.title)
             priceEdit?.setText(formatPlainPrice(product.priceCents))
             resultPanel?.visibility = View.VISIBLE
+            overlayView?.post { keepOverlayInsideGestureArea() }
         }
     }
 
