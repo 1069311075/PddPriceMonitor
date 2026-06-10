@@ -16,10 +16,14 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -27,6 +31,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.pddpricemonitor.PddMonitorApp
 import com.example.pddpricemonitor.R
+import com.example.pddpricemonitor.data.ProductPriceComparison
 import com.example.pddpricemonitor.data.ProductRepository
 import com.example.pddpricemonitor.ocr.DetectedProduct
 import com.example.pddpricemonitor.ocr.ProductTextParser
@@ -58,6 +63,8 @@ class ScreenCaptureService : Service() {
     private var resultPanel: LinearLayout? = null
     private var titleEdit: EditText? = null
     private var priceEdit: EditText? = null
+    private var comparisonText: TextView? = null
+    private var currentComparison: ProductPriceComparison? = null
 
     private val recognizer = TextRecognizerClient()
     private val parser = ProductTextParser()
@@ -143,7 +150,8 @@ class ScreenCaptureService : Service() {
                     return@launch
                 }
 
-                showEditableResult(product)
+                val comparison = repository?.findPriceComparison(product)
+                showEditableResult(product, comparison)
                 MonitorDebugState.update(
                     message = "Recognized. Edit then save from floating panel.",
                     textLength = text.text.length,
@@ -226,12 +234,45 @@ class ScreenCaptureService : Service() {
             minLines = 2
             maxLines = 3
             textSize = 13f
-            setOnClickListener { scheduleAutoCollapse() }
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setOnClickListener {
+                cancelAutoCollapse()
+                showKeyboard(this)
+            }
+            setOnFocusChangeListener { view, hasFocus ->
+                if (hasFocus) {
+                    cancelAutoCollapse()
+                    showKeyboard(view)
+                }
+            }
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    updateComparisonText(parsePriceCents(s?.toString().orEmpty()))
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
         }
         priceEdit = EditText(this).apply {
             hint = "Price, e.g. 185.05"
             textSize = 16f
-            setOnClickListener { scheduleAutoCollapse() }
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setOnClickListener {
+                cancelAutoCollapse()
+                showKeyboard(this)
+            }
+            setOnFocusChangeListener { view, hasFocus ->
+                if (hasFocus) {
+                    cancelAutoCollapse()
+                    showKeyboard(view)
+                }
+            }
+        }
+        comparisonText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(31, 138, 112))
+            visibility = View.GONE
+            setPadding(0, dp(4), 0, dp(6))
         }
 
         val decimalButtons = LinearLayout(this).apply {
@@ -265,6 +306,7 @@ class ScreenCaptureService : Service() {
 
         resultPanel?.addView(titleEdit)
         resultPanel?.addView(priceEdit)
+        resultPanel?.addView(comparisonText)
         resultPanel?.addView(decimalButtons)
         resultPanel?.addView(buttons)
         root.addView(ballText)
@@ -411,18 +453,42 @@ class ScreenCaptureService : Service() {
         autoCollapseJob = null
     }
 
-    private suspend fun showEditableResult(product: DetectedProduct) {
+    private suspend fun showEditableResult(
+        product: DetectedProduct,
+        comparison: ProductPriceComparison?
+    ) {
         withContext(Dispatchers.Main) {
             if (resultPanel?.visibility != View.VISIBLE) {
                 rememberCollapsedOverlayPosition()
             }
+            setOverlayEditingMode(true)
             ballText?.text = formatPrice(product.priceCents)
+            currentComparison = comparison
             titleEdit?.setText(product.title)
             priceEdit?.setText(formatPlainPrice(product.priceCents))
+            updateComparisonText(product.priceCents)
             resultPanel?.visibility = View.VISIBLE
             overlayView?.post { keepOverlayInsideGestureArea() }
         }
         scheduleAutoCollapse()
+    }
+
+    private fun formatComparison(currentPriceCents: Long, comparison: ProductPriceComparison?): String {
+        comparison ?: return ""
+        val diff = currentPriceCents - comparison.previousLowestCents
+        val lowest = formatPlainPrice(comparison.previousLowestCents)
+        val previous = formatPlainPrice(comparison.previousPriceCents)
+        return when {
+            diff < 0 -> "历史最低 ¥$lowest，本次低 ¥${formatPlainPrice(-diff)}"
+            diff == 0L -> "历史最低 ¥$lowest，本次等于历史最低"
+            else -> "历史最低 ¥$lowest，本次高 ¥${formatPlainPrice(diff)}"
+        } + "；上次价 ¥$previous"
+    }
+
+    private fun updateComparisonText(currentPriceCents: Long?) {
+        val textValue = currentPriceCents?.let { formatComparison(it, currentComparison) }.orEmpty()
+        comparisonText?.text = textValue
+        comparisonText?.visibility = if (textValue.isBlank()) View.GONE else View.VISIBLE
     }
 
     private suspend fun updateOverlayStatus(text: String, showPanel: Boolean) {
@@ -430,10 +496,46 @@ class ScreenCaptureService : Service() {
             val wasPanelVisible = resultPanel?.visibility == View.VISIBLE
             ballText?.text = text
             resultPanel?.visibility = if (showPanel) View.VISIBLE else View.GONE
+            setOverlayEditingMode(showPanel)
             if (wasPanelVisible && !showPanel) {
                 overlayView?.post { restoreCollapsedOverlayPosition() }
             }
         }
+    }
+
+    private fun setOverlayEditingMode(enabled: Boolean) {
+        val params = overlayParams ?: return
+        val view = overlayView ?: return
+        val notFocusable = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+
+        params.flags = if (enabled) {
+            params.flags and notFocusable.inv()
+        } else {
+            hideKeyboard()
+            titleEdit?.clearFocus()
+            priceEdit?.clearFocus()
+            params.flags or notFocusable
+        }
+        params.softInputMode = if (enabled) {
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        } else {
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+        }
+        runCatching { windowManager?.updateViewLayout(view, params) }
+    }
+
+    private fun showKeyboard(view: View) {
+        view.post {
+            view.requestFocus()
+            val inputManager = getSystemService(InputMethodManager::class.java)
+            inputManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    private fun hideKeyboard() {
+        val view = overlayView ?: return
+        val inputManager = getSystemService(InputMethodManager::class.java)
+        inputManager?.hideSoftInputFromWindow(view.windowToken, 0)
     }
 
     private fun parsePriceCents(text: String): Long? {
