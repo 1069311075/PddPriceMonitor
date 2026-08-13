@@ -65,8 +65,9 @@ class ProductTextParser {
             "\\u4E00\\u5E74\\u8D28\\u4FDD|\\u552E\\u540E|\\u5143\\u8D77)"
     )
     private val titleStartRegex = Regex(
-        "(\\u54C1\\u724C|\\u79D2\\u6740|\\u5B98\\u65B9\\u65D7\\u8230|\\u65D7\\u8230\\u5E97|" +
-            "\\u4E13\\u5356\\u5E97|\\u3010[^\\u3011]{1,12}\\u3011)"
+        "(\\u54C1\\u724C|\\u79D2\\u6740|\\u5B98\\u65B9\\u65D7\\u8230\\u5E97|" +
+            "\\u5B98\\u65B9\\u65D7\\u8230|\\u65D7\\u8230\\u5E97|\\u65D7\\u8230|" +
+            "\\u4E13\\u5356\\u5E97|\\u4E13\\u8425\\u5E97|\\u3010[^\\u3011]{1,12}\\u3011)"
     )
     private val titleStopRegex = Regex(
         "(\\u98DF\\u54C1\\u56DE\\u5934\\u5BA2\\u597D\\u5E97|\\u9632\\u8150\\u5242|" +
@@ -87,8 +88,9 @@ class ProductTextParser {
     private val leadingTitleBadgeRegex = Regex(
         "^\\s*(\\u767E\\u4EBF\\u8865\\u8D34\\s*)?(\\u79D2\\u6740\\s*)?" +
             "(618\\s*)?(\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u6536\\u85CF\\s*)?" +
-            "(\\u54C1\\u724C\\s*[^\\s\\u3010]{0,12}\\s*)?(\\u5B98\\u65B9\\u65D7\\u8230\\s*)?" +
-            "(\\u65D7\\u8230\\u5E97\\s*)?(\\u4E13\\u5356\\u5E97\\s*)?"
+            "(\\u54C1\\u724C\\s*[^\\s\\u3010]{0,12}\\s*)?(\\u5B98\\u65B9\\u65D7\\u8230\\u5E97\\s*)?" +
+            "(\\u5B98\\u65B9\\u65D7\\u8230\\s*)?" +
+            "(\\u65D7\\u8230\\u5E97\\s*)?(\\u4E13\\u5356\\u5E97\\s*)?(\\u4E13\\u8425\\u5E97\\s*)?"
     )
     private val obviousNonTitleRegex = Regex(
         "(pinduoduo|rmb|cny|intel\\s*\\u7CFB\\u5217|amd\\s*\\u7CFB\\u5217|" +
@@ -148,7 +150,7 @@ class ProductTextParser {
             .sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
 
     private fun parseDetailProduct(lines: List<OcrLine>): DetectedProduct? {
-        return parseByBlackTitle(lines)
+        return parseByBlackTitle(lines) ?: parseByMainPriceBand(lines)
     }
 
     private fun parseByBlackTitle(lines: List<OcrLine>): DetectedProduct? {
@@ -165,6 +167,23 @@ class ProductTextParser {
             title = title,
             normalizedTitle = normalized,
             priceCents = bottomPrice.cents,
+            rawText = priceLine.text
+        )
+    }
+
+    private fun parseByMainPriceBand(lines: List<OcrLine>): DetectedProduct? {
+        val priceLine = findMainDetailPriceLine(lines) ?: return null
+        val price = extractPriceCents(priceLine) ?: return null
+        val title = findStructuredTitleBelowPrice(lines, priceLine)
+            ?: findLooseDetailTitleNearPrice(lines, priceLine)
+            ?: return null
+        val normalized = normalizeTitle(title)
+        if (normalized.length < 6) return null
+
+        return DetectedProduct(
+            title = title,
+            normalizedTitle = normalized,
+            priceCents = price,
             rawText = priceLine.text
         )
     }
@@ -279,8 +298,8 @@ class ProductTextParser {
         val linePrice = lines
             .filter { it.rect.top >= minTop || it.rect.bottom >= sample.screenHeight * 0.94 }
             .filter { it.rect.right >= minLeft }
-            .filterNot { isBadPriceContext(it.text) }
-            .filterNot { isForbiddenBottomNumberContext(it.text) }
+            .filterNot { isBadPriceContext(it.text) && !isExplicitBottomPriceLine(it.text) }
+            .filterNot { isForbiddenBottomPriceLine(it.text) }
             .mapNotNull { line ->
                 val cents = extractBottomBarPriceCents(line) ?: return@mapNotNull null
                 BottomPrice(line, cents)
@@ -294,7 +313,7 @@ class ProductTextParser {
         val bottomLines = lines
             .filter { it.rect.top >= minTop || it.rect.bottom >= it.screenHeight * 0.94 }
             .filter { it.rect.right >= minLeft }
-            .filterNot { isForbiddenBottomNumberContext(it.text) }
+            .filterNot { isForbiddenBottomPriceLine(it.text) }
 
         val explicitLinePrice = bottomLines
             .mapNotNull { line ->
@@ -368,8 +387,13 @@ class ProductTextParser {
         if (yuan == 100L || yuan == 618L) return true
         if (!text.contains('.') && !text.contains(',') && Regex("[\\u00A5\\uFFE5]\\s*0[.,]\\d{1,2}").containsMatchIn(lineText)) return true
         if (Regex("\\d+\\s*%|100%|\\d{1,2}:\\d{2}|618").containsMatchIn(elementText)) return true
-        if (isForbiddenBottomNumberContext(lineText)) return true
-        if (Regex("(\\u4EBA|\\u4EF6|\\u5DF2\\u552E|\\u9500\\u91CF|\\u5269\\u4F59|\\u5012\\u8BA1\\u65F6)").containsMatchIn(lineText)) return true
+        if (isForbiddenBottomNumberContext(lineText) && !isExplicitBottomPriceLine(lineText)) return true
+        if (
+            Regex("(\\u4EBA|\\u4EF6|\\u5DF2\\u552E|\\u9500\\u91CF|\\u5269\\u4F59|\\u5012\\u8BA1\\u65F6)").containsMatchIn(lineText) &&
+            !isExplicitBottomPriceLine(lineText)
+        ) {
+            return true
+        }
         return yuan !in 1..999_999
     }
 
@@ -378,6 +402,20 @@ class ProductTextParser {
             "\\d+\\s*%|100%|618|\\u767E\\u4EBF\\u8865\\u8D34|\\u4F18\\u60E0|" +
                 "\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD|\\u70ED\\u5356|\\u8BC4\\u4EF7"
         ).containsMatchIn(text)
+
+    private fun isForbiddenBottomPriceLine(text: String): Boolean =
+        isForbiddenBottomNumberContext(text) && !isExplicitBottomPriceLine(text)
+
+    private fun isExplicitBottomPriceLine(text: String): Boolean =
+        Regex(
+            "(\\u5238\\u540E|\\u9650\\u65F6|\\u9650\\u91CF\\u4EF7|\\u79D2\\u6740\\u4EF7|" +
+                "\\u6700\\u540E\\d*\\u5206\\u949F|\\u53D1\\u8D77\\u62FC\\u5355|" +
+                "\\u7ACB\\u5373\\u62FC\\u5355|\\u60CA\\u559C\\u7279\\u4EF7)"
+        ).containsMatchIn(text) &&
+            (
+                text.any { it == '\u00A5' || it == '\uFFE5' } ||
+                    Regex("\\d{1,4}[.,]\\d{1,2}").containsMatchIn(text)
+                )
 
     private fun bottomNumberScore(number: BottomNumber): Int {
         var score = 0
@@ -400,7 +438,7 @@ class ProductTextParser {
         score += priceTextHeight(line).coerceAtMost(90)
         score += (line.rect.bottom / 20)
         score += (line.rect.width() / 80)
-        if (isForbiddenBottomNumberContext(line.text)) score -= 220
+        if (isForbiddenBottomPriceLine(line.text)) score -= 220
         if (Regex("\\d{1,2}:\\d{2}:\\d{2}").containsMatchIn(line.text)) score -= 80
         return score
     }
@@ -550,11 +588,43 @@ class ProductTextParser {
             couponNoiseRegex.containsMatchIn(text)
 
     private fun isShopOrGuaranteeLine(text: String): Boolean =
-        Regex(
-            "(\\u6765\\u81EA|\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
-                "100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|\\u4EBA\\u5728\\u62FC|" +
-                "\\u4EBA\\u5728\\u62A2\\u4F18\\u60E0|\\u7ACB\\u5373\\u62FC\\u5355)"
+        !isTitleLineWithShopBadge(text) &&
+            Regex(
+                "(\\u6765\\u81EA|\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
+                    "100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|\\u4EBA\\u5728\\u62FC|" +
+                    "\\u4EBA\\u5728\\u62A2\\u4F18\\u60E0|\\u7ACB\\u5373\\u62FC\\u5355)"
+            ).containsMatchIn(text)
+
+    private fun isTitleLineWithShopBadge(text: String): Boolean {
+        if (
+            Regex(
+                "(\\u6765\\u81EA|100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|" +
+                    "\\u5E97\\u94FA\\u4FDD\\u969C|\\u8BE5\\u54C1\\u724C|\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C)"
+            ).containsMatchIn(text)
+        ) {
+            return false
+        }
+
+        val hasShopBadge = Regex(
+            "(\\u5B98\\u65B9\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
+                "\\u65D7\\u8230\\u5E97|\\u65D7\\u8230|\\u4E13\\u5356\\u5E97|\\u4E13\\u8425\\u5E97)"
         ).containsMatchIn(text)
+        if (!hasShopBadge) return false
+
+        val hasProductSignal =
+            text.contains('\u3010') ||
+                Regex(
+                    "(\\d+(?:\\.\\d+)?\\s*(g|kg|ml|l|\\u514B|\\u6BEB\\u5347|\\u5347|\\u53EA|" +
+                        "\\u74F6|\\u888B|\\u76D2|\\u5305|\\u65A4|\\u7247|\\u679A)|" +
+                        "\\u4E70\\d+\\u9001|\\u96F6\\u98DF|\\u98DF\\u54C1|\\u6D17\\u5242|" +
+                        "\\u725B\\u8089|\\u9762|\\u996D|\\u6C41|\\u996E\\u54C1|\\u8336\\u70B9|" +
+                        "\\u5305\\u88C5|\\u9178\\u5976|\\u5E03\\u4E01|\\u5364|\\u70E7\\u70E4|" +
+                        "\\u6D77\\u82D4|\\u96EA\\u997C)",
+                    RegexOption.IGNORE_CASE
+                ).containsMatchIn(text)
+
+        return hasProductSignal && normalizeTitle(text).length >= 10
+    }
 
     private fun isStructuredTitleLine(line: OcrLine): Boolean =
         isTitleCandidateLine(line) &&
@@ -760,7 +830,7 @@ class ProductTextParser {
 
     private fun extractPriceCentsFromElements(line: OcrLine): Long? {
         if (line.elements.isEmpty()) return null
-        if (isBadPriceContext(line.text)) return null
+        if (isBadPriceContext(line.text) && !isExplicitBottomPriceLine(line.text)) return null
         if (!line.text.any { it == '\u00A5' || it == '\uFFE5' }) return null
 
         val marker = line.elements
