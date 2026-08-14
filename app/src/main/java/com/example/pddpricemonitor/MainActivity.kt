@@ -30,8 +30,10 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -73,11 +75,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
@@ -93,6 +99,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.pddpricemonitor.capture.MonitorDebugState
@@ -813,18 +820,27 @@ private fun ProductCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            }
             .animateContentSize(),
-        onClick = onClick,
-        interactionSource = interactionSource,
         colors = CardDefaults.cardColors(containerColor = CardWhite),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            // 只有头部（标题 + 价格）可点击展开/收起，详情区与折线图不再响应收起
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        scaleX = pressScale
+                        scaleY = pressScale
+                    }
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = onClick
+                    )
+            ) {
             Text(
                 text = item.title,
                 style = MaterialTheme.typography.bodyLarge,
@@ -874,6 +890,7 @@ private fun ProductCard(
                         color = TextSecondary
                     )
                 }
+            }
             }
 
             if (expanded) {
@@ -1106,6 +1123,8 @@ private fun PriceLineChart(
         targetValue = if (revealed) 1f else 0f,
         animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing)
     )
+    // 选中的数据点索引：点击后高亮该点并弹出价格/时间气泡
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
     val textMeasurer = rememberTextMeasurer()
     val axisStyle = TextStyle(
         color = TextSecondary,
@@ -1125,7 +1144,23 @@ private fun PriceLineChart(
             .background(Color(0xFFF5F5F7), RoundedCornerShape(12.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(chartPrices.size) {
+                    detectTapGestures { tap ->
+                        if (chartPrices.size > 1) {
+                            val lastIdx = chartPrices.lastIndex
+                            val leftPx = 8.dp.toPx()
+                            val rightPx = size.width - 8.dp.toPx()
+                            val widthPx = (rightPx - leftPx).coerceAtLeast(1f)
+                            val fraction = ((tap.x - leftPx) / widthPx).coerceIn(0f, 1f)
+                            val nearest = (fraction * lastIdx).roundToInt().coerceIn(0, lastIdx)
+                            selectedIndex = if (selectedIndex == nearest) null else nearest
+                        }
+                    }
+                }
+        ) {
             val left = 8.dp.toPx()
             val right = size.width - 8.dp.toPx()
             val top = 14.dp.toPx()
@@ -1143,6 +1178,19 @@ private fun PriceLineChart(
                     strokeWidth = 1.dp.toPx()
                 )
             }
+            // 竖直细分网格：让折线在每个数据点上的位置看得更清楚
+            if (chartPrices.size > 1) {
+                val gridCount = kotlin.math.min(chartPrices.size, 8)
+                repeat(gridCount) { index ->
+                    val gridX = left + width * index / (gridCount - 1).coerceAtLeast(1)
+                    drawLine(
+                        color = Color(0xFFF0F0F3),
+                        start = Offset(gridX, top),
+                        end = Offset(gridX, bottom),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                }
+            }
 
             val points = chartPrices.mapIndexed { index, price ->
                 val x = if (chartPrices.size == 1) {
@@ -1154,13 +1202,13 @@ private fun PriceLineChart(
                 Offset(x, y)
             }
 
-            val smoothPath = buildSmoothPath(points)
+            val linePath = buildLinePath(points)
 
-            // 平滑曲线 + 渐变面积，随动画从左向右揭开
+            // 直角折线 + 渐变面积，随动画从左向右揭开
             clipRect(right = left + width * progress) {
                 if (points.size > 1) {
                     val areaPath = Path().apply {
-                        addPath(smoothPath)
+                        addPath(linePath)
                         lineTo(points.last().x, bottom)
                         lineTo(points.first().x, bottom)
                         close()
@@ -1173,9 +1221,13 @@ private fun PriceLineChart(
                         )
                     )
                     drawPath(
-                        path = smoothPath,
+                        path = linePath,
                         color = BrandRed,
-                        style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
+                        style = Stroke(
+                            width = 2.5.dp.toPx(),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
+                        )
                     )
                 }
                 // 中间数据点：白底红边小圆点，让每条记录都可见
@@ -1271,6 +1323,56 @@ private fun PriceLineChart(
                     alpha = progress
                 )
             }
+
+            // 选中点：竖直引导线 + 放大高亮 + 价格/时间气泡
+            val sel = selectedIndex
+            if (sel != null && sel in points.indices && history.size > 1) {
+                val selPoint = points[sel]
+                // 竖直引导线：从选中点垂直到底部，标明对应横轴位置
+                drawLine(
+                    color = BrandRed.copy(alpha = 0.35f),
+                    start = Offset(selPoint.x, selPoint.y),
+                    end = Offset(selPoint.x, bottom),
+                    strokeWidth = 1.dp.toPx()
+                )
+                // 放大高亮选中点
+                drawCircle(Color(0x33E02E24), radius = 9.dp.toPx(), center = selPoint)
+                drawCircle(BrandRed, radius = 4.5.dp.toPx(), center = selPoint)
+                drawCircle(Color.White, radius = 1.8.dp.toPx(), center = selPoint)
+
+                // 气泡：价格 + 时间
+                val content = "${formatPrice(chartPrices[sel])} · ${chartDateTime(history[sel].recordedAt)}"
+                val bubbleText = textMeasurer.measure(
+                    text = content,
+                    style = TextStyle(
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                )
+                val padX = 8.dp.toPx()
+                val padY = 5.dp.toPx()
+                val bubbleW = bubbleText.size.width + padX * 2
+                val bubbleH = bubbleText.size.height + padY * 2
+                val bubbleX = (selPoint.x - bubbleW / 2f)
+                    .coerceIn(left, (right - bubbleW).coerceAtLeast(left))
+                val placeBelow = selPoint.y - bubbleH - 10.dp.toPx() < top
+                val bubbleY = if (placeBelow) {
+                    selPoint.y + 10.dp.toPx()
+                } else {
+                    selPoint.y - bubbleH - 10.dp.toPx()
+                }
+                drawRoundRect(
+                    color = Color(0xE61A1A1A),
+                    topLeft = Offset(bubbleX, bubbleY),
+                    size = Size(bubbleW, bubbleH),
+                    cornerRadius = CornerRadius(6.dp.toPx())
+                )
+                drawText(
+                    textLayoutResult = bubbleText,
+                    topLeft = Offset(bubbleX + padX, bubbleY + padY)
+                )
+            }
         }
         if (history.size <= 1) {
             Text(
@@ -1283,24 +1385,13 @@ private fun PriceLineChart(
     }
 }
 
-private fun buildSmoothPath(points: List<Offset>): Path {
+// 直角折线：相邻数据点用直线连接，转折处加圆角，直观不花哨
+private fun buildLinePath(points: List<Offset>): Path {
     val path = Path()
     if (points.isEmpty()) return path
     path.moveTo(points.first().x, points.first().y)
-    if (points.size < 3) {
-        for (i in 1 until points.size) path.lineTo(points[i].x, points[i].y)
-        return path
-    }
-    for (i in 0 until points.size - 1) {
-        val p0 = points[max(0, i - 1)]
-        val p1 = points[i]
-        val p2 = points[i + 1]
-        val p3 = points[min(points.size - 1, i + 2)]
-        path.cubicTo(
-            p1.x + (p2.x - p0.x) / 6f, p1.y + (p2.y - p0.y) / 6f,
-            p2.x - (p3.x - p1.x) / 6f, p2.y - (p3.y - p1.y) / 6f,
-            p2.x, p2.y
-        )
+    for (i in 1 until points.size) {
+        path.lineTo(points[i].x, points[i].y)
     }
     return path
 }
@@ -1316,6 +1407,9 @@ private fun shortTime(timeMillis: Long): String =
 
 private fun chartDate(timeMillis: Long): String =
     SimpleDateFormat("M/d", Locale.CHINA).format(Date(timeMillis))
+
+private fun chartDateTime(timeMillis: Long): String =
+    SimpleDateFormat("M/d HH:mm", Locale.CHINA).format(Date(timeMillis))
 
 private fun isToday(timeMillis: Long): Boolean {
     val dayFormat = SimpleDateFormat("yyyyMMdd", Locale.CHINA)

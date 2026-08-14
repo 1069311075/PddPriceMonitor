@@ -2,6 +2,7 @@
     <string name="app_name">我爱拼多多</string>
     <string name="capture_notification_title">我爱拼多多 正在运行</string>
     <string name="capture_notification_text">仅在拼多多处于前台时进行 OCR 识别</string>
+    <string name="capture_notification_stop">停止</string>
     <string name="accessibility_service_label">拼多多前台检测</string>
     <string name="accessibility_service_description">检测拼多多是否在前台，用于减少不必要的截屏与 OCR 频率。</string>
 </resources>

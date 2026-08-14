@@ -3,6 +3,7 @@
 import android.animation.ValueAnimator
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -93,7 +94,7 @@ class ScreenCaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification())
+        startForeground(NOTIFICATION_ID, createNotification().build())
 
         if (intent?.action == ACTION_STOP) {
             stopSelf()
@@ -104,7 +105,13 @@ class ScreenCaptureService : Service() {
         val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA) ?: return START_NOT_STICKY
 
         startProjection(resultCode, data)
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    // 用户从最近任务列表划掉应用时，立即停止前台服务并释放屏幕投射
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     private fun startProjection(resultCode: Int, data: Intent) {
@@ -848,14 +855,24 @@ class ScreenCaptureService : Service() {
             if (withStroke) setStroke(dp(1), HairlineBorder)
         }
 
-    private fun createNotification() =
-        NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun createNotification(): NotificationCompat.Builder {
+        val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            0,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(getString(R.string.capture_notification_title))
             .setContentText(getString(R.string.capture_notification_text))
-            .setOngoing(true)
+            .setOngoing(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+            .addAction(0, getString(R.string.capture_notification_stop), stopPendingIntent)
+    }
 
     override fun onCreate() {
         super.onCreate()
