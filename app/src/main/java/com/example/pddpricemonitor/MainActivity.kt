@@ -1112,6 +1112,11 @@ private fun PriceLineChart(
         fontSize = 9.sp,
         fontWeight = FontWeight.Medium
     )
+    // 关键点价格标注样式：比轴标签略大加粗，一眼可读
+    val pointLabelStyle = TextStyle(
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold
+    )
 
     Box(
         modifier = Modifier
@@ -1173,8 +1178,20 @@ private fun PriceLineChart(
                         style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
                     )
                 }
+                // 中间数据点：白底红边小圆点，让每条记录都可见
+                points.forEachIndexed { index, point ->
+                    if (index != minIndex && index != lastIndex) {
+                        drawCircle(Color.White, radius = 3.5.dp.toPx(), center = point)
+                        drawCircle(
+                            color = BrandRed,
+                            radius = 3.5.dp.toPx(),
+                            center = point,
+                            style = Stroke(width = 1.5.dp.toPx())
+                        )
+                    }
+                }
                 // 历史最低点：绿点 + 柔和光晕
-                if (points.size > 1 && minIndex <= lastIndex) {
+                if (points.size > 1 && minIndex != lastIndex) {
                     val minPoint = points[minIndex]
                     drawCircle(Color(0x1A1DC981), radius = 10.dp.toPx(), center = minPoint)
                     drawCircle(Color(0xFF1DC981), radius = 4.dp.toPx(), center = minPoint)
@@ -1189,19 +1206,71 @@ private fun PriceLineChart(
                 }
             }
 
-            // 纵轴价格标注，随动画淡入
+            // 最高价标注（左上）
             drawText(
                 textMeasurer = textMeasurer,
                 text = formatPrice(maxPrice),
                 topLeft = Offset(left, 0f),
                 style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
             )
-            drawText(
-                textMeasurer = textMeasurer,
-                text = formatPrice(minPrice),
-                topLeft = Offset(left, size.height - 14.dp.toPx()),
-                style = axisStyle.copy(color = Color(0xFF1DC981).copy(alpha = progress))
-            )
+
+            // 当前点价格标注（红色，点位上方）
+            if (points.isNotEmpty()) {
+                val lastPoint = points[lastIndex]
+                val lastLabel = textMeasurer.measure(
+                    text = formatPrice(chartPrices[lastIndex]),
+                    style = pointLabelStyle.copy(color = BrandRed)
+                )
+                drawText(
+                    textLayoutResult = lastLabel,
+                    topLeft = Offset(
+                        (lastPoint.x - lastLabel.size.width / 2f)
+                            .coerceIn(left, (right - lastLabel.size.width).coerceAtLeast(left)),
+                        (lastPoint.y - lastLabel.size.height - 7.dp.toPx()).coerceAtLeast(0f)
+                    ),
+                    alpha = progress
+                )
+            }
+
+            // 最低价标注（绿色，点位上方；与当前点重合时不重复标）
+            if (points.size > 1 && minIndex != lastIndex) {
+                val minPoint = points[minIndex]
+                val minLabel = textMeasurer.measure(
+                    text = formatPrice(minPrice),
+                    style = pointLabelStyle.copy(color = FreshGreen)
+                )
+                drawText(
+                    textLayoutResult = minLabel,
+                    topLeft = Offset(
+                        (minPoint.x - minLabel.size.width / 2f)
+                            .coerceIn(left, (right - minLabel.size.width).coerceAtLeast(left)),
+                        (minPoint.y - minLabel.size.height - 7.dp.toPx()).coerceAtLeast(0f)
+                    ),
+                    alpha = progress
+                )
+            }
+
+            // 首尾日期标注（底部两角），给出时间参照
+            if (history.size > 1) {
+                drawText(
+                    textMeasurer = textMeasurer,
+                    text = chartDate(history.first().recordedAt),
+                    topLeft = Offset(left, size.height - 13.dp.toPx()),
+                    style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
+                )
+                val lastDateLabel = textMeasurer.measure(
+                    text = chartDate(history.last().recordedAt),
+                    style = axisStyle
+                )
+                drawText(
+                    textLayoutResult = lastDateLabel,
+                    topLeft = Offset(
+                        right - lastDateLabel.size.width,
+                        size.height - 13.dp.toPx()
+                    ),
+                    alpha = progress
+                )
+            }
         }
         if (history.size <= 1) {
             Text(
@@ -1244,6 +1313,9 @@ private fun formatTime(timeMillis: Long): String =
 
 private fun shortTime(timeMillis: Long): String =
     SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(timeMillis))
+
+private fun chartDate(timeMillis: Long): String =
+    SimpleDateFormat("M/d", Locale.CHINA).format(Date(timeMillis))
 
 private fun isToday(timeMillis: Long): Boolean {
     val dayFormat = SimpleDateFormat("yyyyMMdd", Locale.CHINA)
