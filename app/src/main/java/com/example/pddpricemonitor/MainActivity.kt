@@ -563,49 +563,61 @@ private fun StatCards(
     productCount: Int,
     updatedCount: Int
 ) {
-    Row(
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        colors = CardDefaults.cardColors(containerColor = CardWhite),
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        StatCard(title = "今日记录", value = todayCount, accent = true)
-        StatCard(title = "在记商品", value = productCount)
-        StatCard(title = "有价格变动", value = updatedCount)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            StatColumn(title = "今日记录", value = todayCount, accent = true)
+            StatDivider()
+            StatColumn(title = "在记商品", value = productCount)
+            StatDivider()
+            StatColumn(title = "有价格变动", value = updatedCount)
+        }
     }
 }
 
 @Composable
-private fun RowScope.StatCard(title: String, value: Int, accent: Boolean = false) {
+private fun StatDivider() {
+    Box(
+        modifier = Modifier
+            .width(1.dp)
+            .height(26.dp)
+            .background(Color(0xFFEFEFF2))
+    )
+}
+
+@Composable
+private fun RowScope.StatColumn(title: String, value: Int, accent: Boolean = false) {
     // 数字变化时滚动过渡，而不是生硬跳变
     val animatedValue by animateIntAsState(
         targetValue = value,
         animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing),
         label = "stat-$title"
     )
-    Card(
+    Column(
         modifier = Modifier.weight(1f),
-        colors = CardDefaults.cardColors(containerColor = CardWhite),
-        shape = RoundedCornerShape(14.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary
-            )
-            Spacer(modifier = Modifier.height(5.dp))
-            Text(
-                text = "$animatedValue 件",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                color = if (accent) BrandRed else TextPrimary
-            )
-        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary
+        )
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(
+            text = "$animatedValue 件",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = if (accent) BrandRed else TextPrimary
+        )
     }
 }
 
@@ -652,6 +664,13 @@ private fun SectionHeader(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Box(
+            modifier = Modifier
+                .width(3.5.dp)
+                .height(15.dp)
+                .background(BrandRed, RoundedCornerShape(2.dp))
+        )
+        Spacer(modifier = Modifier.width(7.dp))
         Text(
             text = if (fullScreenList) "全部商品" else "最近扫描",
             style = MaterialTheme.typography.titleSmall,
@@ -821,17 +840,28 @@ private fun ProductCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "当前 ${formatPrice(item.priceCents)}",
-                        style = MaterialTheme.typography.titleSmall,
+                        text = formatPrice(item.priceCents),
+                        fontSize = 19.sp,
                         color = BrandRed,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "最低 ${formatPrice(minPrice)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondary
-                    )
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "最低 ${formatPrice(minPrice)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary
+                        )
+                        val previousPrice = if (history.size >= 2) {
+                            history[history.lastIndex - 1].priceCents
+                        } else {
+                            null
+                        }
+                        if (previousPrice != null && previousPrice != item.priceCents) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            PriceChangeChip(current = item.priceCents, previous = previousPrice)
+                        }
+                    }
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     if (isAtLowest) {
@@ -892,6 +922,33 @@ private fun LowestBadge() {
     }
 }
 
+// 涨跌标签：比上次便宜用绿（值得买信号），贵了用红（提醒等等）
+@Composable
+private fun PriceChangeChip(current: Long, previous: Long) {
+    val diff = current - previous
+    val cheaper = diff < 0
+    Row(
+        modifier = Modifier
+            .background(
+                if (cheaper) SoftGreen else BrandRedSoft,
+                RoundedCornerShape(50)
+            )
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = if (cheaper) {
+                "▼ 比上次降 ${formatPrice(-diff)}"
+            } else {
+                "▲ 比上次涨 ${formatPrice(diff)}"
+            },
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (cheaper) FreshGreen else BrandRed
+        )
+    }
+}
+
 @Composable
 private fun ProductHistoryDetail(
     history: List<ProductPriceHistory>,
@@ -901,10 +958,38 @@ private fun ProductHistoryDetail(
     val minPrice = prices.minOrNull() ?: currentPrice
     val maxPrice = prices.maxOrNull() ?: currentPrice
 
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(14.dp))
     HorizontalDivider(color = Color(0xFFEFEFF2))
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(14.dp))
 
+    // 「价格走势」区块：标题 + 图例，图表是本区块的视觉主角
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(13.dp)
+                .background(BrandRed, RoundedCornerShape(2.dp))
+        )
+        Spacer(modifier = Modifier.width(7.dp))
+        Text(
+            text = "价格走势",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        LegendDot(color = BrandRed, label = "当前")
+        Spacer(modifier = Modifier.width(10.dp))
+        LegendDot(color = FreshGreen, label = "最低")
+    }
+
+    Spacer(modifier = Modifier.height(10.dp))
+    PriceLineChart(history = history, fallbackPrice = currentPrice)
+
+    Spacer(modifier = Modifier.height(12.dp))
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -914,16 +999,22 @@ private fun ProductHistoryDetail(
         StatPill(label = "最高", value = formatPrice(maxPrice))
     }
 
-    Spacer(modifier = Modifier.height(12.dp))
-    PriceLineChart(history = history, fallbackPrice = currentPrice)
-
-    Spacer(modifier = Modifier.height(10.dp))
-    Text(
-        text = "历史明细",
-        style = MaterialTheme.typography.bodyMedium,
-        fontWeight = FontWeight.SemiBold,
-        color = TextPrimary
-    )
+    Spacer(modifier = Modifier.height(14.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(13.dp)
+                .background(Color(0xFFD8D8DE), RoundedCornerShape(2.dp))
+        )
+        Spacer(modifier = Modifier.width(7.dp))
+        Text(
+            text = "历史明细",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+    }
     Spacer(modifier = Modifier.height(6.dp))
 
     val recentHistory = history.asReversed().take(8)
@@ -981,6 +1072,24 @@ private fun RowScope.StatPill(label: String, value: String, highlight: Boolean =
 }
 
 @Composable
+private fun LegendDot(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary
+        )
+    }
+}
+
+@Composable
 private fun PriceLineChart(
     history: List<ProductPriceHistory>,
     fallbackPrice: Long
@@ -1007,7 +1116,7 @@ private fun PriceLineChart(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(130.dp)
+            .height(160.dp)
             .background(Color(0xFFF5F5F7), RoundedCornerShape(12.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
