@@ -50,6 +50,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -82,6 +83,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -91,6 +93,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
@@ -123,6 +128,11 @@ private val FreshGreen = Color(0xFF1DC981)
 private val SoftGreen = Color(0xFFE9F9F1)
 private val TextPrimary = Color(0xFF1A1A1A)
 private val TextSecondary = Color(0xFF8A8F99)
+
+// 斜体衬线字体：用于价格数字、品牌字等需要"艺术感"的关键元素
+private val SerifItalic = FontFamily(
+    Font(R.font.source_serif_4_italic, weight = FontWeight.Normal, style = FontStyle.Italic)
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -326,7 +336,7 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
             }
             items(filteredProducts, key = { it.id }) { item ->
                 val itemIndex = filteredProducts.indexOf(item)
-                StaggeredAppearance(index = itemIndex) {
+                StaggeredAppearance(index = itemIndex, modifier = Modifier.animateItem()) {
                     val dismissState = rememberSwipeToDismissBoxState(
                         confirmValueChange = { value ->
                             if (value == SwipeToDismissBoxValue.EndToStart) {
@@ -398,10 +408,11 @@ private fun TopBar(
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = if (fullScreenList) "商品价格" else "我爱拼多多",
-                style = MaterialTheme.typography.titleMedium,
+                text = if (fullScreenList) "商品价格" else "Love PDD",
+                style = MaterialTheme.typography.titleLarge,
+                fontFamily = if (fullScreenList) FontFamily.Default else SerifItalic,
                 fontWeight = FontWeight.Bold,
-                color = TextPrimary
+                color = if (fullScreenList) TextPrimary else BrandRed
             )
             if (!fullScreenList) {
                 Text(
@@ -570,24 +581,18 @@ private fun StatCards(
     productCount: Int,
     updatedCount: Int
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = CardWhite),
-        shape = RoundedCornerShape(14.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    // 去卡片化：用大数字 + 细分割线撑起层次，不再用圆角白卡容器
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            StatColumn(title = "今日记录", value = todayCount, accent = true)
-            StatDivider()
-            StatColumn(title = "在记商品", value = productCount)
-            StatDivider()
-            StatColumn(title = "有价格变动", value = updatedCount)
-        }
+        StatColumn(title = "今日记录", value = todayCount, accent = true)
+        StatDivider()
+        StatColumn(title = "在记商品", value = productCount)
+        StatDivider()
+        StatColumn(title = "有价格变动", value = updatedCount)
     }
 }
 
@@ -621,7 +626,8 @@ private fun RowScope.StatColumn(title: String, value: Int, accent: Boolean = fal
         Spacer(modifier = Modifier.height(5.dp))
         Text(
             text = "$animatedValue 件",
-            style = MaterialTheme.typography.titleSmall,
+            fontSize = 22.sp,
+            fontFamily = SerifItalic,
             fontWeight = FontWeight.Bold,
             color = if (accent) BrandRed else TextPrimary
         )
@@ -633,30 +639,47 @@ private fun SearchBox(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit
 ) {
-    OutlinedTextField(
-        value = searchQuery,
-        onValueChange = onSearchQueryChange,
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        shape = RoundedCornerShape(14.dp),
-        label = { Text("搜索商品") },
-        placeholder = { Text("名称 / 型号 / 关键词") },
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = BrandRed,
-            focusedLabelColor = BrandRed,
-            cursorColor = BrandRed,
-            unfocusedBorderColor = HairlineBorder,
-            focusedContainerColor = CardWhite,
-            unfocusedContainerColor = CardWhite
-        ),
-        trailingIcon = {
-            if (searchQuery.isNotBlank()) {
-                TextButton(onClick = { onSearchQueryChange("") }) {
-                    Text("清除", color = TextSecondary)
+    // 内联化搜索：浅灰圆底 + 无边框，视觉更轻，贴合 Apple 风格
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF2F2F4), RoundedCornerShape(13.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        BasicTextField(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium
+            ),
+            cursorBrush = SolidColor(BrandRed),
+            decorationBox = { innerTextField ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (searchQuery.isEmpty()) {
+                            Text(
+                                text = "搜索商品名称 / 型号",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextSecondary
+                            )
+                        }
+                        innerTextField()
+                    }
+                    if (searchQuery.isNotBlank()) {
+                        TextButton(onClick = { onSearchQueryChange("") }) {
+                            Text("清除", color = TextSecondary)
+                        }
+                    }
                 }
             }
-        }
-    )
+        )
+    }
 }
 
 @Composable
@@ -778,20 +801,25 @@ private fun GuideStep(index: Int, text: String, isLast: Boolean = false) {
     }
 }
 
-// 列表交错入场：前 8 项依次上浮淡入，之后的项直接显示（避免滚动时重播）
+// 列表交错入场：前 6 项依次上浮淡入，之后的项直接显示（避免滚动时重播与首屏卡顿）
 @Composable
-private fun StaggeredAppearance(index: Int, content: @Composable () -> Unit) {
-    var visible by remember { mutableStateOf(index >= 8) }
+private fun StaggeredAppearance(
+    index: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    var visible by remember { mutableStateOf(index >= 6) }
     LaunchedEffect(Unit) {
         if (!visible) {
-            delay(index * 70L)
+            delay(index * 50L)
             visible = true
         }
     }
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(durationMillis = 380)) +
-            slideInVertically(animationSpec = tween(durationMillis = 380)) { it / 6 },
+        modifier = modifier,
+        enter = fadeIn(tween(durationMillis = 320)) +
+            slideInVertically(animationSpec = tween(durationMillis = 320)) { it / 6 },
         exit = fadeOut(tween(durationMillis = 120))
     ) {
         content()
@@ -808,6 +836,10 @@ private fun ProductCard(
     val history by viewModel.historyFor(item.id).collectAsState(initial = emptyList())
     val minPrice = history.minOfOrNull { it.priceCents } ?: item.priceCents
     val isAtLowest = item.priceCents <= minPrice
+    val previousPrice = if (history.size >= 2) history[history.lastIndex - 1].priceCents else null
+    val isDowngrade = previousPrice != null && item.priceCents < previousPrice
+    // 关键买入信号：当前已是历史最低，且比上次还便宜 → 卡片渲染淡绿色光晕
+    val showBuyGlow = isAtLowest && isDowngrade
 
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -820,7 +852,12 @@ private fun ProductCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .animateContentSize(),
+            .animateContentSize()
+            .border(
+                width = 1.2.dp,
+                color = if (showBuyGlow) FreshGreen.copy(alpha = 0.30f) else Color.Transparent,
+                shape = RoundedCornerShape(16.dp)
+            ),
         colors = CardDefaults.cardColors(containerColor = CardWhite),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -857,7 +894,8 @@ private fun ProductCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = formatPrice(item.priceCents),
-                        fontSize = 19.sp,
+                        fontSize = 20.sp,
+                        fontFamily = SerifItalic,
                         color = BrandRed,
                         fontWeight = FontWeight.Bold
                     )
@@ -866,13 +904,9 @@ private fun ProductCard(
                         Text(
                             text = "最低 ${formatPrice(minPrice)}",
                             style = MaterialTheme.typography.labelMedium,
+                            fontFamily = SerifItalic,
                             color = TextSecondary
                         )
-                        val previousPrice = if (history.size >= 2) {
-                            history[history.lastIndex - 1].priceCents
-                        } else {
-                            null
-                        }
                         if (previousPrice != null && previousPrice != item.priceCents) {
                             Spacer(modifier = Modifier.width(8.dp))
                             PriceChangeChip(current = item.priceCents, previous = previousPrice)
@@ -894,7 +928,16 @@ private fun ProductCard(
             }
 
             if (expanded) {
-                ProductHistoryDetail(history = history, currentPrice = item.priceCents)
+                // 组合动效：高度由外层 animateContentSize 平滑撑开，内容淡入并轻微上移
+                AnimatedVisibility(
+                    visible = true,
+                    enter = fadeIn(tween(300, easing = FastOutSlowInEasing)) +
+                        slideInVertically(
+                            animationSpec = tween(300, easing = FastOutSlowInEasing)
+                        ) { it / 10 }
+                ) {
+                    ProductHistoryDetail(history = history, currentPrice = item.priceCents)
+                }
             }
         }
     }
@@ -939,11 +982,19 @@ private fun LowestBadge() {
     }
 }
 
-// 涨跌标签：比上次便宜用绿（值得买信号），贵了用红（提醒等等）
+// 涨跌标签：比上次便宜用绿（值得买信号），贵了用红（提醒等等），数字滚动从旧值到新值增强反馈
 @Composable
 private fun PriceChangeChip(current: Long, previous: Long) {
     val diff = current - previous
+    val diffFloat = diff.toFloat()
     val cheaper = diff < 0
+    // 数字滚动动画：从 0 → diff，强化"变化"的视觉反馈
+    val animatedDiff by animateFloatAsState(
+        targetValue = diffFloat,
+        animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing),
+        label = "price-diff"
+    )
+    val roundedDiff = kotlin.math.abs(animatedDiff.roundToInt()) / 100
     Row(
         modifier = Modifier
             .background(
@@ -955,9 +1006,9 @@ private fun PriceChangeChip(current: Long, previous: Long) {
     ) {
         Text(
             text = if (cheaper) {
-                "▼ 比上次降 ${formatPrice(-diff)}"
+                "▼ 比上次降 ¥$roundedDiff"
             } else {
-                "▲ 比上次涨 ${formatPrice(diff)}"
+                "▲ 比上次涨 ¥$roundedDiff"
             },
             fontSize = 10.sp,
             fontWeight = FontWeight.SemiBold,
@@ -974,6 +1025,7 @@ private fun ProductHistoryDetail(
     val prices = history.map { it.priceCents }
     val minPrice = prices.minOrNull() ?: currentPrice
     val maxPrice = prices.maxOrNull() ?: currentPrice
+    var showAll by remember { mutableStateOf(false) }
 
     Spacer(modifier = Modifier.height(14.dp))
     HorizontalDivider(color = Color(0xFFEFEFF2))
@@ -1034,8 +1086,12 @@ private fun ProductHistoryDetail(
     }
     Spacer(modifier = Modifier.height(6.dp))
 
-    val recentHistory = history.asReversed().take(8)
-    recentHistory.forEachIndexed { index, record ->
+    val allReversed = history.asReversed()
+    val displayed = if (showAll) allReversed else allReversed.take(8)
+    displayed.forEachIndexed { index, record ->
+        // 与更早一条记录比较，得出涨跌幅（一眼看出这条是涨还是跌）
+        val nextRecord = allReversed.getOrNull(index + 1)
+        val change = if (nextRecord != null) record.priceCents - nextRecord.priceCents else null
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1048,6 +1104,16 @@ private fun ProductHistoryDetail(
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
+            if (change != null && change != 0L) {
+                Text(
+                    text = if (change < 0) "↓ ${formatPrice(-change)}" else "↑ ${formatPrice(change)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = SerifItalic,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (change < 0) FreshGreen else BrandRed
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Text(
                 text = formatPrice(record.priceCents),
                 style = MaterialTheme.typography.bodyMedium,
@@ -1055,8 +1121,20 @@ private fun ProductHistoryDetail(
                 color = if (record.priceCents == minPrice) FreshGreen else TextPrimary
             )
         }
-        if (index != recentHistory.lastIndex) {
+        if (index != displayed.lastIndex) {
             HorizontalDivider(color = Color(0xFFF5F5F7))
+        }
+    }
+    if (!showAll && history.size > 8) {
+        TextButton(
+            onClick = { showAll = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "展开全部（共 ${history.size} 条）",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextSecondary
+            )
         }
     }
 }
