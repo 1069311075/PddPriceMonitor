@@ -1,7 +1,7 @@
 <resources>
-    <string name="app_name">PDD Price Monitor</string>
-    <string name="capture_notification_title">PDD price monitor is running</string>
-    <string name="capture_notification_text">OCR runs only while PDD is in foreground</string>
-    <string name="accessibility_service_label">PDD foreground detector</string>
-    <string name="accessibility_service_description">Detects whether PDD is in the foreground to reduce screen capture and OCR frequency.</string>
+    <string name="app_name">我爱拼多多</string>
+    <string name="capture_notification_title">我爱拼多多 正在运行</string>
+    <string name="capture_notification_text">仅在拼多多处于前台时进行 OCR 识别</string>
+    <string name="accessibility_service_label">拼多多前台检测</string>
+    <string name="accessibility_service_description">检测拼多多是否在前台，用于减少不必要的截屏与 OCR 频率。</string>
 </resources>

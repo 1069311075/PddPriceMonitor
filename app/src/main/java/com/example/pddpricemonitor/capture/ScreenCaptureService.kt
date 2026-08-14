@@ -1,5 +1,6 @@
 ﻿package com.example.pddpricemonitor.capture
 
+import android.animation.ValueAnimator
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -7,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -24,8 +26,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
-import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -45,6 +47,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+// 「清爽红」设计系统：与主界面保持一致，取拼多多品牌红做记忆点
+private val BrandRed = Color.parseColor("#E02E24")
+private val BrandRedSoft = Color.parseColor("#FFF1F0")
+private val FreshGreen = Color.parseColor("#1DC981")
+private val SoftGreen = Color.parseColor("#E9F9F1")
+private val CardWhite = Color.WHITE
+private val TextPrimary = Color.parseColor("#1A1A1A")
+private val TextSecondary = Color.parseColor("#8A8F99")
+private val HairlineBorder = Color.parseColor("#1A1A1A1A")
+private val PanelBackground = Color.parseColor("#F5F5F7")
+
 class ScreenCaptureService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var worker: Job? = null
@@ -60,14 +73,22 @@ class ScreenCaptureService : Service() {
     private var collapsedOverlayX: Int? = null
     private var collapsedOverlayY: Int? = null
     private var ballText: TextView? = null
+    private var ballRing: View? = null
+    private var ringAnimator: ValueAnimator? = null
     private var resultPanel: LinearLayout? = null
     private var titleEdit: EditText? = null
     private var priceEdit: EditText? = null
-    private var comparisonText: TextView? = null
+    private var comparisonStrip: LinearLayout? = null
+    private var comparisonDot: View? = null
+    private var comparisonTitle: TextView? = null
+    private var comparisonHint: TextView? = null
     private var currentComparison: ProductPriceComparison? = null
 
     private val recognizer = TextRecognizerClient()
     private val parser = ProductTextParser()
+
+    // 悬浮球三态：待机红球 / 识别中脉冲光圈 / 成功绿勾（出错为灰感叹号）
+    private enum class BallState { IDLE, SCANNING, SUCCESS, ERROR }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -122,7 +143,7 @@ class ScreenCaptureService : Service() {
         bitmapSource = ImageReaderBitmapSource(requireNotNull(imageReader))
         repository = ProductRepository((application as PddMonitorApp).database.productPriceDao())
         showFloatingBall()
-        MonitorDebugState.update("Floating ball ready. Tap it on a product page.")
+        MonitorDebugState.update("悬浮球已就绪，去商品页点它")
     }
 
     private fun captureOnce() {
@@ -130,12 +151,12 @@ class ScreenCaptureService : Service() {
         val source = bitmapSource ?: return
 
         worker = scope.launch {
-            updateOverlayStatus("OCR...", showPanel = false)
+            updateOverlayStatus(BallState.SCANNING, showPanel = false)
             val fullBitmap = source.acquireLatestBitmap()
             if (fullBitmap == null) {
-                updateOverlayStatus("No frame", showPanel = false)
+                updateOverlayStatus(BallState.ERROR, showPanel = false)
                 scheduleStatusRestore()
-                MonitorDebugState.update("No screen frame yet")
+                MonitorDebugState.update("还没有画面，稍后再试")
                 return@launch
             }
 
@@ -144,10 +165,10 @@ class ScreenCaptureService : Service() {
                 val result = parser.parseWithReason(text, fullBitmap)
                 val product = result.products.singleOrNull()
                 if (product == null) {
-                    updateOverlayStatus("No item", showPanel = false)
+                    updateOverlayStatus(BallState.ERROR, showPanel = false)
                     scheduleStatusRestore()
                     MonitorDebugState.update(
-                        message = result.skippedReason ?: "No product detected",
+                        message = result.skippedReason ?: "没有识别到商品",
                         textLength = text.text.length,
                         parsedProducts = result.products.size,
                         savedProducts = 0
@@ -158,15 +179,15 @@ class ScreenCaptureService : Service() {
                 val comparison = repository?.findPriceComparison(product)
                 showEditableResult(product, comparison)
                 MonitorDebugState.update(
-                    message = "Recognized. Edit then save from floating panel.",
+                    message = "识别成功，核对后点保存",
                     textLength = text.text.length,
                     parsedProducts = 1,
                     savedProducts = 0
                 )
             } catch (error: Throwable) {
-                updateOverlayStatus("Error", showPanel = false)
+                updateOverlayStatus(BallState.ERROR, showPanel = false)
                 scheduleStatusRestore()
-                MonitorDebugState.update("Capture/OCR error: ${error.javaClass.simpleName}")
+                MonitorDebugState.update("识别出错：${error.javaClass.simpleName}")
             } finally {
                 fullBitmap.recycle()
             }
@@ -178,7 +199,7 @@ class ScreenCaptureService : Service() {
         val title = titleEdit?.text?.toString()?.trim().orEmpty()
         val priceCents = parsePriceCents(priceEdit?.text?.toString().orEmpty())
         if (title.isBlank() || priceCents == null) {
-            scope.launch { updateOverlayStatus("Check input", showPanel = true) }
+            scope.launch { updateOverlayStatus(BallState.ERROR, showPanel = true) }
             return
         }
 
@@ -192,9 +213,10 @@ class ScreenCaptureService : Service() {
         scope.launch {
             cancelAutoCollapse()
             val saved = repo.saveManualProduct(product)
-            updateOverlayStatus("OCR", showPanel = false)
+            updateOverlayStatus(BallState.SUCCESS, showPanel = false)
+            scheduleStatusRestore()
             MonitorDebugState.update(
-                message = "Saved edited product",
+                message = "已保存",
                 parsedProducts = 1,
                 savedProducts = saved
             )
@@ -210,26 +232,39 @@ class ScreenCaptureService : Service() {
             setPadding(dp(2), dp(2), dp(2), dp(2))
         }
 
-        ballText = TextView(this).apply {
-            text = "OCR"
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            background = circleBackground(Color.rgb(233, 68, 79))
-            elevation = dp(6).toFloat()
-            layoutParams = LinearLayout.LayoutParams(dp(68), dp(68))
+        // 悬浮球：待机红球 / 识别中脉冲光圈 / 成功绿勾
+        val ballWrap = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(72), dp(72))
             setOnClickListener { captureOnce() }
         }
+        ballRing = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.TRANSPARENT)
+                setStroke(dp(2), BrandRed)
+            }
+            alpha = 0f
+        }
+        ballWrap.addView(ballRing, FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER))
+        ballText = TextView(this).apply {
+            text = "¥"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            background = circleBackground(BrandRed)
+            elevation = dp(6).toFloat()
+        }
+        ballWrap.addView(ballText, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
 
         resultPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = roundedBackground(Color.WHITE)
-            elevation = dp(8).toFloat()
-            layoutParams = LinearLayout.LayoutParams(dp(292), WindowManager.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(8)
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = roundedBackground(CardWhite)
+            elevation = dp(12).toFloat()
+            layoutParams = LinearLayout.LayoutParams(dp(300), WindowManager.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(10)
             }
             setOnTouchListener { _, _ ->
                 scheduleAutoCollapse()
@@ -237,12 +272,42 @@ class ScreenCaptureService : Service() {
             }
         }
 
+        // 顶部：眉题 + 关闭
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "识别结果"
+            textSize = 12f
+            setTextColor(TextSecondary)
+            layoutParams = LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        header.addView(TextView(this).apply {
+            text = "×"
+            textSize = 18f
+            setTextColor(TextSecondary)
+            setPadding(dp(10), 0, 0, 0)
+            setOnClickListener {
+                cancelAutoCollapse()
+                scope.launch { updateOverlayStatus(BallState.IDLE, showPanel = false) }
+            }
+        })
+
+        // 商品标题：下划线式输入，更轻
         titleEdit = EditText(this).apply {
             hint = "商品名称"
-            minLines = 2
+            minLines = 1
             maxLines = 3
-            textSize = 13f
+            textSize = 14f
+            setTextColor(TextPrimary)
+            setHintTextColor(TextSecondary)
+            background = null
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            layoutParams = LinearLayout.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
             setOnClickListener {
                 cancelAutoCollapse()
                 showKeyboard(this)
@@ -254,10 +319,38 @@ class ScreenCaptureService : Service() {
                 }
             }
         }
-        priceEdit = EditText(this).apply {
-            hint = "价格，例如 185.05"
+        val titleDivider = View(this).apply {
+            setBackgroundColor(HairlineBorder)
+            layoutParams = LinearLayout.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                dp(1)
+            ).apply { topMargin = dp(6) }
+        }
+
+        // 价格：大号红色数字，视觉锚点
+        val priceRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            layoutParams = LinearLayout.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
+        }
+        priceRow.addView(TextView(this).apply {
+            text = "¥"
             textSize = 16f
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextColor(BrandRed)
+        })
+        priceEdit = EditText(this).apply {
+            hint = "0.00"
+            textSize = 26f
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextColor(BrandRed)
+            setHintTextColor(Color.parseColor("#F3B8B4"))
+            background = null
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            layoutParams = LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener {
                 cancelAutoCollapse()
                 showKeyboard(this)
@@ -276,50 +369,91 @@ class ScreenCaptureService : Service() {
                 override fun afterTextChanged(s: Editable?) = Unit
             })
         }
-        comparisonText = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.rgb(31, 138, 112))
-            visibility = View.GONE
-            setPadding(0, dp(4), 0, dp(6))
+        priceRow.addView(priceEdit)
+        val priceHint = TextView(this).apply {
+            text = "点数字可修改 · 识别不准直接改"
+            textSize = 11f
+            setTextColor(TextSecondary)
+            layoutParams = LinearLayout.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(4) }
         }
 
-        val decimalButtons = LinearLayout(this).apply {
+        // 对比条：一眼看懂值不值得买
+        comparisonStrip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(10), dp(9), dp(10), dp(9))
+            background = roundedBackground(SoftGreen, radiusDp = 10, withStroke = false)
+            layoutParams = LinearLayout.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
         }
-        decimalButtons.addView(Button(this).apply {
-            text = "/10"
-            setTextColor(Color.rgb(31, 41, 51))
-            setOnClickListener { shiftPriceDecimal(-1) }
-        })
-        decimalButtons.addView(Button(this).apply {
-            text = "x10"
-            setTextColor(Color.rgb(31, 41, 51))
-            setOnClickListener { shiftPriceDecimal(1) }
-        })
+        comparisonDot = View(this).apply {
+            background = circleBackground(FreshGreen)
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7))
+        }
+        comparisonTitle = TextView(this).apply {
+            textSize = 13f
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextColor(TextPrimary)
+            setPadding(dp(8), 0, dp(6), 0)
+        }
+        comparisonHint = TextView(this).apply {
+            textSize = 12f
+            setTextColor(TextSecondary)
+        }
+        comparisonStrip?.addView(comparisonDot)
+        comparisonStrip?.addView(comparisonTitle)
+        comparisonStrip?.addView(comparisonHint)
 
+        // 按钮：保存（红填充）+ 重新识别（描边）
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
+            layoutParams = LinearLayout.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
         }
-        buttons.addView(Button(this).apply {
+        buttons.addView(TextView(this).apply {
             text = "保存"
+            gravity = Gravity.CENTER
+            textSize = 15f
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextColor(Color.WHITE)
+            background = roundedBackground(BrandRed, radiusDp = 10, withStroke = false)
+            setPadding(0, dp(11), 0, dp(11))
+            layoutParams = LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { saveEditedProduct() }
         })
-        buttons.addView(Button(this).apply {
-            text = "关闭"
+        buttons.addView(TextView(this).apply {
+            text = "重新识别"
+            gravity = Gravity.CENTER
+            textSize = 15f
+            setTextColor(TextSecondary)
+            background = roundedBackground(Color.TRANSPARENT, radiusDp = 10, withStroke = true)
+            setPadding(0, dp(11), 0, dp(11))
+            layoutParams = LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(8)
+            }
             setOnClickListener {
                 cancelAutoCollapse()
-                scope.launch { updateOverlayStatus("OCR", showPanel = false) }
+                scope.launch { updateOverlayStatus(BallState.IDLE, showPanel = false) }
+                captureOnce()
             }
         })
 
+        resultPanel?.addView(header)
         resultPanel?.addView(titleEdit)
-        resultPanel?.addView(priceEdit)
-        resultPanel?.addView(comparisonText)
-        resultPanel?.addView(decimalButtons)
+        resultPanel?.addView(titleDivider)
+        resultPanel?.addView(priceRow)
+        resultPanel?.addView(priceHint)
+        resultPanel?.addView(comparisonStrip)
         resultPanel?.addView(buttons)
-        root.addView(ballText)
+        root.addView(ballWrap)
         root.addView(resultPanel)
 
         overlayParams = WindowManager.LayoutParams(
@@ -336,7 +470,7 @@ class ScreenCaptureService : Service() {
         }
 
         attachDrag(root)
-        ballText?.let { attachDrag(it) }
+        attachDrag(ballWrap)
         overlayView = root
         runCatching {
             windowManager?.addView(root, overlayParams)
@@ -451,15 +585,15 @@ class ScreenCaptureService : Service() {
         cancelAutoCollapse()
         autoCollapseJob = scope.launch {
             delay(AUTO_COLLAPSE_MS)
-            updateOverlayStatus("OCR", showPanel = false)
+            updateOverlayStatus(BallState.IDLE, showPanel = false)
         }
     }
 
     private fun scheduleStatusRestore() {
         cancelAutoCollapse()
         autoCollapseJob = scope.launch {
-            delay(AUTO_COLLAPSE_MS)
-            updateOverlayStatus("OCR", showPanel = false)
+            delay(BALL_RESTORE_MS)
+            updateOverlayStatus(BallState.IDLE, showPanel = false)
         }
     }
 
@@ -477,7 +611,7 @@ class ScreenCaptureService : Service() {
                 rememberCollapsedOverlayPosition()
             }
             setOverlayEditingMode(true)
-            ballText?.text = formatPrice(product.priceCents)
+            setBallState(BallState.SUCCESS)
             currentComparison = comparison
             titleEdit?.setText(product.title)
             priceEdit?.setText(formatPlainPrice(product.priceCents))
@@ -488,33 +622,110 @@ class ScreenCaptureService : Service() {
         scheduleAutoCollapse()
     }
 
-    private fun formatComparison(currentPriceCents: Long, comparison: ProductPriceComparison?): String {
-        comparison ?: return ""
-        val diff = currentPriceCents - comparison.previousLowestCents
-        val lowest = formatPlainPrice(comparison.previousLowestCents)
-        val previous = formatPlainPrice(comparison.previousPriceCents)
-        return when {
-            diff < 0 -> "历史最低 ¥$lowest，本次低 ¥${formatPlainPrice(-diff)}"
-            diff == 0L -> "历史最低 ¥$lowest，本次等于历史最低"
-            else -> "历史最低 ¥$lowest，本次高 ¥${formatPlainPrice(diff)}"
-        } + "；上次价 ¥$previous"
-    }
+    // 对比条：绿 = 值得买（低于/持平历史最低），红 = 可以再等等
     private fun updateComparisonText(currentPriceCents: Long?) {
-        val textValue = currentPriceCents?.let { formatComparison(it, currentComparison) }.orEmpty()
-        comparisonText?.text = textValue
-        comparisonText?.visibility = if (textValue.isBlank()) View.GONE else View.VISIBLE
+        val strip = comparisonStrip ?: return
+        val current = currentPriceCents
+        if (current == null) {
+            strip.visibility = View.GONE
+            return
+        }
+        strip.visibility = View.VISIBLE
+        val comparison = currentComparison
+        if (comparison == null) {
+            applyComparisonStyle(BrandRedSoft, BrandRed)
+            comparisonTitle?.text = "首次记录"
+            comparisonHint?.text = "价格锚点已建立"
+            return
+        }
+        val diff = current - comparison.previousLowestCents
+        when {
+            diff < 0 -> {
+                applyComparisonStyle(SoftGreen, FreshGreen)
+                comparisonTitle?.text = "比历史最低还低 ¥${formatPlainPrice(-diff)}"
+                comparisonHint?.text = "值得入手"
+            }
+            diff == 0L -> {
+                applyComparisonStyle(SoftGreen, FreshGreen)
+                comparisonTitle?.text = "持平历史最低"
+                comparisonHint?.text = "好价"
+            }
+            else -> {
+                applyComparisonStyle(BrandRedSoft, BrandRed)
+                comparisonTitle?.text = "比历史最低高 ¥${formatPlainPrice(diff)}"
+                comparisonHint?.text = "可以再等等"
+            }
+        }
     }
 
-    private suspend fun updateOverlayStatus(text: String, showPanel: Boolean) {
+    private fun applyComparisonStyle(backgroundColor: Int, dotColor: Int) {
+        comparisonStrip?.background = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(backgroundColor)
+        }
+        comparisonDot?.background = circleBackground(dotColor)
+    }
+
+    private suspend fun updateOverlayStatus(state: BallState, showPanel: Boolean) {
         withContext(Dispatchers.Main) {
             val wasPanelVisible = resultPanel?.visibility == View.VISIBLE
-            ballText?.text = text
+            setBallState(state)
             resultPanel?.visibility = if (showPanel) View.VISIBLE else View.GONE
             setOverlayEditingMode(showPanel)
             if (wasPanelVisible && !showPanel) {
                 overlayView?.post { restoreCollapsedOverlayPosition() }
             }
         }
+    }
+
+    private fun setBallState(state: BallState) {
+        val label = ballText ?: return
+        when (state) {
+            BallState.IDLE -> {
+                stopRingPulse()
+                label.text = "¥"
+                label.background = circleBackground(BrandRed)
+            }
+            BallState.SCANNING -> {
+                label.text = "¥"
+                label.background = circleBackground(BrandRed)
+                startRingPulse()
+            }
+            BallState.SUCCESS -> {
+                stopRingPulse()
+                label.text = "✓"
+                label.background = circleBackground(FreshGreen)
+            }
+            BallState.ERROR -> {
+                stopRingPulse()
+                label.text = "!"
+                label.background = circleBackground(TextSecondary)
+            }
+        }
+    }
+
+    // 识别中：光圈脉冲，1.3s 一次，与呼吸感动效同一量级
+    private fun startRingPulse() {
+        val ring = ballRing ?: return
+        stopRingPulse()
+        ringAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 1_300L
+            repeatCount = ValueAnimator.INFINITE
+            addUpdateListener { animator ->
+                val progress = animator.animatedValue as Float
+                val scale = 0.78f + progress * 0.4f
+                ring.scaleX = scale
+                ring.scaleY = scale
+                ring.alpha = (1f - progress) * 0.65f
+            }
+            start()
+        }
+    }
+
+    private fun stopRingPulse() {
+        ringAnimator?.cancel()
+        ringAnimator = null
+        ballRing?.alpha = 0f
     }
 
     private fun setOverlayEditingMode(enabled: Boolean) {
@@ -563,22 +774,6 @@ class ScreenCaptureService : Service() {
         return (yuan * 100 + cents).takeIf { it in 1..999_999_00 }
     }
 
-    private fun shiftPriceDecimal(direction: Int) {
-        val current = parsePriceCents(priceEdit?.text?.toString().orEmpty()) ?: return
-        val shifted = when {
-            direction < 0 -> (current / 10).coerceAtLeast(1L)
-            direction > 0 -> current * 10
-            else -> current
-        }.takeIf { it in 1..999_999_00 } ?: return
-
-        priceEdit?.setText(formatPlainPrice(shifted))
-        priceEdit?.setSelection(priceEdit?.text?.length ?: 0)
-        scheduleAutoCollapse()
-    }
-
-    private fun formatPrice(cents: Long): String =
-        "¥${formatPlainPrice(cents)}"
-
     private fun formatPlainPrice(cents: Long): String =
         "${cents / 100}.${(cents % 100).toString().padStart(2, '0')}"
 
@@ -591,11 +786,11 @@ class ScreenCaptureService : Service() {
             setColor(color)
         }
 
-    private fun roundedBackground(color: Int): GradientDrawable =
+    private fun roundedBackground(color: Int, radiusDp: Int = 20, withStroke: Boolean = true): GradientDrawable =
         GradientDrawable().apply {
-            cornerRadius = dp(16).toFloat()
+            cornerRadius = dp(radiusDp).toFloat()
             setColor(color)
-            setStroke(dp(1), Color.rgb(232, 236, 234))
+            if (withStroke) setStroke(dp(1), HairlineBorder)
         }
 
     private fun createNotification() =
@@ -622,6 +817,7 @@ class ScreenCaptureService : Service() {
     override fun onDestroy() {
         worker?.cancel()
         cancelAutoCollapse()
+        stopRingPulse()
         overlayView?.let { view ->
             runCatching { windowManager?.removeView(view) }
         }
@@ -639,7 +835,8 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         private const val CHANNEL_ID = "screen_capture"
         private const val NOTIFICATION_ID = 1001
-        private const val AUTO_COLLAPSE_MS = 5_000L
+        private const val AUTO_COLLAPSE_MS = 8_000L
+        private const val BALL_RESTORE_MS = 1_500L
 
         fun startIntent(context: Context, resultCode: Int, data: Intent): Intent =
             Intent(context, ScreenCaptureService::class.java)

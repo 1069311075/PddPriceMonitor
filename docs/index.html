@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>我爱拼多多 · 下载安装</title>
+<style>
+  :root{
+    --brand:#E02E24;
+    --brand-soft:#FFF1F0;
+    --green:#1DC981;
+    --text:#1A1A1A;
+    --text-2:#8A8F99;
+    --bg:#F5F5F7;
+    --card:#FFFFFF;
+    --border:rgba(26,26,26,0.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:var(--bg);color:var(--text);line-height:1.7;
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+  }
+  .wrap{max-width:520px;width:100%}
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:20px;
+    padding:36px 32px;box-shadow:0 12px 32px rgba(20,20,20,0.06);
+  }
+  .logo{font-size:26px;font-weight:800;color:var(--brand);letter-spacing:1px}
+  .sub{font-size:14px;color:var(--text-2);margin-top:6px}
+  .divider{height:1px;background:var(--border);margin:24px 0}
+  h2{font-size:16px;font-weight:700;margin-bottom:12px}
+  .step{display:flex;gap:12px;margin-bottom:16px;align-items:flex-start}
+  .num{
+    flex:none;width:26px;height:26px;border-radius:50%;background:var(--brand-soft);
+    color:var(--brand);font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center;
+  }
+  .step p{font-size:14px}
+  .step small{display:block;color:var(--text-2);font-size:12px;margin-top:2px}
+  .btn{
+    display:block;width:100%;text-align:center;background:var(--brand);color:#fff;
+    font-size:17px;font-weight:700;padding:15px 0;border-radius:14px;text-decoration:none;
+    margin-top:8px;transition:opacity .2s;
+  }
+  .btn:hover{opacity:.9}
+  .meta{font-size:12px;color:var(--text-2);text-align:center;margin-top:14px}
+  .warn{background:var(--brand-soft);border-radius:12px;padding:12px 14px;font-size:13px;color:var(--text);margin-top:20px}
+  .warn b{color:var(--brand)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="logo">我爱拼多多</div>
+    <div class="sub">点一下悬浮球，记住价格；再看到同一个商品，立刻知道贵了还是便宜了</div>
+    <div class="divider"></div>
+
+    <h2>安装步骤</h2>
+    <div class="step">
+      <div class="num">1</div>
+      <p>点击下方按钮，下载 APK 安装包
+        <small>约 72MB，含离线识别模型</small>
+      </p>
+    </div>
+    <div class="step">
+      <div class="num">2</div>
+      <p>打开安装包，允许「安装未知来源应用」
+        <small>Android 会弹出安全提醒，选择「仍要安装」即可</small>
+      </p>
+    </div>
+    <div class="step">
+      <div class="num">3</div>
+      <p>打开应用，授权悬浮窗和屏幕录制，去拼多多商品页点悬浮球
+        <small>识别出价格后，核对无误点「保存」</small>
+      </p>
+    </div>
+
+    <a class="btn" href="app-debug.apk" download="我爱拼多多.apk">下载安装包（APK）</a>
+    <div class="meta">版本 v0.1 · Android 10 及以上 · 仅用于个人学习</div>
+
+    <div class="warn">
+      <b>说明：</b>数据仅保存在您本地设备，不上传任何信息。本工具为个人学习用途，请勿用于商业行为。
+    </div>
+  </div>
+</div>
+</body>
+</html>

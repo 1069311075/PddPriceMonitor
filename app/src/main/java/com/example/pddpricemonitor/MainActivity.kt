@@ -15,7 +15,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,14 +33,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -79,15 +78,16 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val AppBackground = Color(0xFFF7F9FB)
+// 「清爽红」设计系统：取拼多多品牌红做记忆点，白底 + 大留白 + 克制用色
+private val AppBackground = Color(0xFFF5F5F7)
 private val CardWhite = Color(0xFFFFFFFF)
-private val FreshGreen = Color(0xFF23A26D)
-private val SoftGreen = Color(0xFFE8F7EF)
-private val BrandRed = Color(0xFFE9444F)
-private val PriceRed = Color(0xFFE53935)
-private val DeleteRed = Color(0xFFE05252)
-private val TextPrimary = Color(0xFF1F2933)
-private val TextSecondary = Color(0xFF7B8794)
+private val HairlineBorder = Color(0x1A1A1A1A)
+private val BrandRed = Color(0xFFE02E24)
+private val BrandRedSoft = Color(0xFFFFF1F0)
+private val FreshGreen = Color(0xFF1DC981)
+private val SoftGreen = Color(0xFFE9F9F1)
+private val TextPrimary = Color(0xFF1A1A1A)
+private val TextSecondary = Color(0xFF8A8F99)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -161,8 +161,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
     pendingDelete?.let { item ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("删除商品") },
-            text = { Text("删除该商品及全部历史记录？") },
+            title = { Text("删除商品", color = TextPrimary) },
+            text = { Text("删除该商品及全部历史记录？", color = TextSecondary) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -171,12 +171,12 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
                         pendingDelete = null
                     }
                 ) {
-                    Text("删除", color = DeleteRed)
+                    Text("删除", color = BrandRed, fontWeight = FontWeight.SemiBold)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) {
-                    Text("取消")
+                    Text("取消", color = TextSecondary)
                 }
             }
         )
@@ -186,14 +186,15 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
         val remaining = 4 - clearConfirmStep
         AlertDialog(
             onDismissRequest = { clearConfirmStep = 0 },
-            title = { Text("确认清空") },
+            title = { Text("确认清空", color = TextPrimary) },
             text = {
                 Text(
-                    if (clearConfirmStep < 3) {
+                    text = if (clearConfirmStep < 3) {
                         "这会删除所有商品和全部价格历史。还需要确认 $remaining 次。"
                     } else {
                         "最后一次确认：清空后无法恢复，确定要删除全部数据吗？"
-                    }
+                    },
+                    color = TextSecondary
                 )
             },
             confirmButton = {
@@ -210,13 +211,14 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
                 ) {
                     Text(
                         text = if (clearConfirmStep >= 3) "彻底清空" else "继续确认",
-                        color = DeleteRed
+                        color = BrandRed,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             },
             dismissButton = {
                 TextButton(onClick = { clearConfirmStep = 0 }) {
-                    Text("取消")
+                    Text("取消", color = TextSecondary)
                 }
             }
         )
@@ -303,7 +305,7 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(DeleteRed, RoundedCornerShape(14.dp))
+                                .background(BrandRed, RoundedCornerShape(14.dp))
                                 .padding(horizontal = 20.dp),
                             contentAlignment = Alignment.CenterEnd
                         ) {
@@ -338,7 +340,7 @@ private fun TopBar(
     ) {
         Spacer(modifier = Modifier.width(34.dp))
         Text(
-            text = if (fullScreenList) "商品价格" else "拼多多价格助手",
+            text = if (fullScreenList) "商品价格" else "我爱拼多多",
             modifier = Modifier.weight(1f),
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.titleMedium,
@@ -346,7 +348,10 @@ private fun TopBar(
             color = TextPrimary
         )
         TextButton(onClick = onToggleFullScreen) {
-            Text(if (fullScreenList) "返回" else "全屏")
+            Text(
+                text = if (fullScreenList) "返回" else "全屏",
+                color = TextSecondary
+            )
         }
     }
 }
@@ -359,7 +364,11 @@ private fun OcrStatusPill(captureStarted: Boolean) {
     ) {
         Row(
             modifier = Modifier
-                .background(SoftGreen, RoundedCornerShape(50))
+                .background(
+                    if (captureStarted) SoftGreen else CardWhite,
+                    RoundedCornerShape(50)
+                )
+                .border(1.dp, HairlineBorder, RoundedCornerShape(50))
                 .padding(horizontal = 14.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -374,7 +383,7 @@ private fun OcrStatusPill(captureStarted: Boolean) {
                 text = if (captureStarted) "OCR 已就绪" else "等待启动 OCR",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = FreshGreen
+                color = if (captureStarted) FreshGreen else TextSecondary
             )
         }
     }
@@ -386,12 +395,11 @@ private fun OcrStartCard(
     debugMessage: String
 ) {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onStartCapture),
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onStartCapture,
         colors = CardDefaults.cardColors(containerColor = BrandRed),
-        shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier
@@ -400,28 +408,19 @@ private fun OcrStartCard(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "启动 OCR 识别",
+                text = "启动悬浮球",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "去拼多多商品页，点击悬浮球识别价格",
+                text = "去拼多多商品页，点一下悬浮球就能记住价格",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.White.copy(alpha = 0.92f)
             )
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = onStartCapture,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White,
-                    contentColor = BrandRed
-                )
-            ) {
-                Text("启动悬浮球")
-            }
             if (debugMessage.isNotBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = debugMessage,
                     style = MaterialTheme.typography.labelSmall,
@@ -445,8 +444,8 @@ private fun StatCards(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         StatCard(title = "今日记录", value = "$todayCount 件")
-        StatCard(title = "历史商品", value = "$productCount 件")
-        StatCard(title = "最低价更新", value = "$updatedCount 件")
+        StatCard(title = "在记商品", value = "$productCount 件")
+        StatCard(title = "有价格变动", value = "$updatedCount 件")
     }
 }
 
@@ -455,8 +454,8 @@ private fun RowScope.StatCard(title: String, value: String) {
     Card(
         modifier = Modifier.weight(1f),
         colors = CardDefaults.cardColors(containerColor = CardWhite),
-        shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier
@@ -490,13 +489,21 @@ private fun SearchBox(
         onValueChange = onSearchQueryChange,
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
         label = { Text("搜索商品") },
         placeholder = { Text("名称 / 型号 / 关键词") },
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = BrandRed,
+            focusedLabelColor = BrandRed,
+            cursorColor = BrandRed,
+            unfocusedBorderColor = HairlineBorder,
+            focusedContainerColor = CardWhite,
+            unfocusedContainerColor = CardWhite
+        ),
         trailingIcon = {
             if (searchQuery.isNotBlank()) {
                 TextButton(onClick = { onSearchQueryChange("") }) {
-                    Text("清除")
+                    Text("清除", color = TextSecondary)
                 }
             }
         }
@@ -529,10 +536,13 @@ private fun SectionHeader(
         )
         Spacer(modifier = Modifier.weight(1f))
         TextButton(onClick = onToggleFullScreen) {
-            Text(if (fullScreenList) "退出全屏" else "查看更多")
+            Text(
+                text = if (fullScreenList) "退出全屏" else "查看更多",
+                color = TextSecondary
+            )
         }
         TextButton(onClick = onClearHistory) {
-            Text("清空")
+            Text("清空", color = TextSecondary)
         }
     }
 }
@@ -542,7 +552,8 @@ private fun EmptyState(searchQuery: String) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = CardWhite),
-        shape = RoundedCornerShape(14.dp)
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Text(
             text = if (searchQuery.isBlank()) "还没有保存商品，先去拼多多点悬浮球识别一次。" else "没有找到匹配的商品。",
@@ -562,23 +573,24 @@ private fun ProductCard(
 ) {
     val history by viewModel.historyFor(item.id).collectAsState(initial = emptyList())
     val minPrice = history.minOfOrNull { it.priceCents } ?: item.priceCents
+    val isAtLowest = item.priceCents <= minPrice
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .animateContentSize()
-            .clickable(onClick = onClick),
+            .animateContentSize(),
+        onClick = onClick,
         colors = CardDefaults.cardColors(containerColor = CardWhite),
         shape = RoundedCornerShape(14.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
             Text(
                 text = item.title,
                 style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
                 color = TextPrimary,
-                maxLines = if (expanded) 8 else 3,
+                maxLines = if (expanded) 8 else 2,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(10.dp))
@@ -589,29 +601,50 @@ private fun ProductCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "当前 ${formatPrice(item.priceCents)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextPrimary,
-                        fontWeight = FontWeight.SemiBold
+                        style = MaterialTheme.typography.titleSmall,
+                        color = BrandRed,
+                        fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "最低 ${formatPrice(minPrice)}",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = FreshGreen,
-                        fontWeight = FontWeight.SemiBold
+                        color = TextSecondary
                     )
                 }
-                Text(
-                    text = "${history.size} 条 · ${shortTime(item.updatedAt)}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = TextSecondary
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    if (isAtLowest) {
+                        LowestBadge()
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                    Text(
+                        text = "${history.size} 条 · ${shortTime(item.updatedAt)}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextSecondary
+                    )
+                }
             }
 
             if (expanded) {
                 ProductHistoryDetail(history = history, currentPrice = item.priceCents)
             }
         }
+    }
+}
+
+@Composable
+private fun LowestBadge() {
+    Box(
+        modifier = Modifier
+            .background(BrandRedSoft, RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = "● 历史最低",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = BrandRed
+        )
     }
 }
 
@@ -625,7 +658,7 @@ private fun ProductHistoryDetail(
     val maxPrice = prices.maxOrNull() ?: currentPrice
 
     Spacer(modifier = Modifier.height(12.dp))
-    HorizontalDivider(color = Color(0xFFE8ECEA))
+    HorizontalDivider(color = Color(0xFFEFEFF2))
     Spacer(modifier = Modifier.height(12.dp))
 
     Row(
@@ -633,7 +666,7 @@ private fun ProductHistoryDetail(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         StatPill(label = "记录", value = "${history.size} 次")
-        StatPill(label = "最低", value = formatPrice(minPrice))
+        StatPill(label = "最低", value = formatPrice(minPrice), highlight = true)
         StatPill(label = "最高", value = formatPrice(maxPrice))
     }
 
@@ -671,17 +704,20 @@ private fun ProductHistoryDetail(
             )
         }
         if (index != recentHistory.lastIndex) {
-            HorizontalDivider(color = Color(0xFFF0F2F1))
+            HorizontalDivider(color = Color(0xFFF5F5F7))
         }
     }
 }
 
 @Composable
-private fun RowScope.StatPill(label: String, value: String) {
+private fun RowScope.StatPill(label: String, value: String, highlight: Boolean = false) {
     Column(
         modifier = Modifier
             .weight(1f)
-            .background(SoftGreen, RoundedCornerShape(10.dp))
+            .background(
+                if (highlight) BrandRedSoft else Color(0xFFF5F5F7),
+                RoundedCornerShape(10.dp)
+            )
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Text(
@@ -693,7 +729,7 @@ private fun RowScope.StatPill(label: String, value: String) {
             text = value,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.SemiBold,
-            color = FreshGreen,
+            color = if (highlight) BrandRed else TextPrimary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -713,7 +749,7 @@ private fun PriceLineChart(
         modifier = Modifier
             .fillMaxWidth()
             .height(130.dp)
-            .background(Color(0xFFF8FAF9), RoundedCornerShape(12.dp))
+            .background(Color(0xFFF5F5F7), RoundedCornerShape(12.dp))
             .padding(12.dp)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -728,7 +764,7 @@ private fun PriceLineChart(
             repeat(3) { index ->
                 val y = top + height * index / 2f
                 drawLine(
-                    color = Color(0xFFE3E8E5),
+                    color = Color(0xFFE8E8EC),
                     start = Offset(left, y),
                     end = Offset(right, y),
                     strokeWidth = 1.dp.toPx()
@@ -750,12 +786,12 @@ private fun PriceLineChart(
                     moveTo(points.first().x, points.first().y)
                     points.drop(1).forEach { lineTo(it.x, it.y) }
                 }
-                drawPath(path = path, color = FreshGreen, style = Stroke(width = 3.dp.toPx()))
+                drawPath(path = path, color = BrandRed, style = Stroke(width = 3.dp.toPx()))
             }
 
             points.forEach { point ->
                 drawCircle(color = Color.White, radius = 5.dp.toPx(), center = point)
-                drawCircle(color = FreshGreen, radius = 3.2.dp.toPx(), center = point)
+                drawCircle(color = BrandRed, radius = 3.2.dp.toPx(), center = point)
             }
         }
         if (history.size <= 1) {
