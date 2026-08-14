@@ -370,8 +370,46 @@ class ScreenCaptureService : Service() {
             })
         }
         priceRow.addView(priceEdit)
+
+        // 小数位修正：OCR 常把 185.05 读成 18.505 或 1850.5，一键 /10 或 x10
+        val decimalGroup = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, 0, dp(2))
+        }
+        decimalGroup.addView(TextView(this).apply {
+            text = "/10"
+            textSize = 13f
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextColor(TextSecondary)
+            gravity = Gravity.CENTER
+            background = roundedBackground(Color.TRANSPARENT, radiusDp = 8, withStroke = true)
+            setPadding(0, dp(5), 0, dp(5))
+            layoutParams = LinearLayout.LayoutParams(dp(40), WindowManager.LayoutParams.WRAP_CONTENT)
+            setOnClickListener {
+                cancelAutoCollapse()
+                shiftPriceDecimal(-1)
+            }
+        })
+        decimalGroup.addView(TextView(this).apply {
+            text = "x10"
+            textSize = 13f
+            setTypeface(Typeface.DEFAULT_BOLD)
+            setTextColor(TextSecondary)
+            gravity = Gravity.CENTER
+            background = roundedBackground(Color.TRANSPARENT, radiusDp = 8, withStroke = true)
+            setPadding(0, dp(5), 0, dp(5))
+            layoutParams = LinearLayout.LayoutParams(dp(40), WindowManager.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = dp(6)
+            }
+            setOnClickListener {
+                cancelAutoCollapse()
+                shiftPriceDecimal(1)
+            }
+        })
+        priceRow.addView(decimalGroup)
         val priceHint = TextView(this).apply {
-            text = "点数字可修改 · 识别不准直接改"
+            text = "点数字可修改 · 识别不准可用 /10 x10 修正"
             textSize = 11f
             setTextColor(TextSecondary)
             layoutParams = LinearLayout.LayoutParams(
@@ -776,6 +814,23 @@ class ScreenCaptureService : Service() {
 
     private fun formatPlainPrice(cents: Long): String =
         "${cents / 100}.${(cents % 100).toString().padStart(2, '0')}"
+
+    private fun shiftPriceDecimal(direction: Int) {
+        val current = parsePriceCents(priceEdit?.text?.toString().orEmpty()) ?: return
+        val shifted = when {
+            direction < 0 -> (current / 10).coerceAtLeast(1L)
+            direction > 0 -> {
+                val multiplied = current * 10
+                if (multiplied > 999_999_00) return
+                multiplied
+            }
+            else -> return
+        }
+        priceEdit?.setText(formatPlainPrice(shifted))
+        priceEdit?.setSelection(priceEdit?.text?.length ?: 0)
+        updateComparisonText(shifted)
+        scheduleAutoCollapse()
+    }
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()
