@@ -14,11 +14,24 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -67,6 +80,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -86,6 +101,7 @@ import com.example.pddpricemonitor.data.ProductPrice
 import com.example.pddpricemonitor.data.ProductPriceHistory
 import com.example.pddpricemonitor.data.ProductRepository
 import com.example.pddpricemonitor.ui.MainViewModel
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -302,37 +318,40 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
                 }
             }
             items(filteredProducts, key = { it.id }) { item ->
-                val dismissState = rememberSwipeToDismissBoxState(
-                    confirmValueChange = { value ->
-                        if (value == SwipeToDismissBoxValue.EndToStart) {
-                            pendingDelete = item
-                        }
-                        false
-                    }
-                )
-                SwipeToDismissBox(
-                    state = dismissState,
-                    enableDismissFromStartToEnd = false,
-                    backgroundContent = {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(BrandRed, RoundedCornerShape(14.dp))
-                                .padding(horizontal = 20.dp),
-                            contentAlignment = Alignment.CenterEnd
-                        ) {
-                            Text("删除", color = Color.White, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                ) {
-                    ProductCard(
-                        item = item,
-                        viewModel = viewModel,
-                        expanded = expandedProductId == item.id,
-                        onClick = {
-                            expandedProductId = if (expandedProductId == item.id) null else item.id
+                val itemIndex = filteredProducts.indexOf(item)
+                StaggeredAppearance(index = itemIndex) {
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = { value ->
+                            if (value == SwipeToDismissBoxValue.EndToStart) {
+                                pendingDelete = item
+                            }
+                            false
                         }
                     )
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        enableDismissFromStartToEnd = false,
+                        backgroundContent = {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(BrandRed, RoundedCornerShape(16.dp))
+                                    .padding(horizontal = 20.dp),
+                                contentAlignment = Alignment.CenterEnd
+                            ) {
+                                Text("删除", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    ) {
+                        ProductCard(
+                            item = item,
+                            viewModel = viewModel,
+                            expanded = expandedProductId == item.id,
+                            onClick = {
+                                expandedProductId = if (expandedProductId == item.id) null else item.id
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -350,15 +369,41 @@ private fun TopBar(
             .padding(top = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Spacer(modifier = Modifier.width(34.dp))
-        Text(
-            text = if (fullScreenList) "商品价格" else "我爱拼多多",
-            modifier = Modifier.weight(1f),
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = TextPrimary
-        )
+        // 品牌 Logo：与悬浮球同款红底白「¥」
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .background(
+                    brush = Brush.linearGradient(
+                        colors = listOf(BrandRed, Color(0xFFC21F16))
+                    ),
+                    shape = RoundedCornerShape(11.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "¥",
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (fullScreenList) "商品价格" else "我爱拼多多",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
+            if (!fullScreenList) {
+                Text(
+                    text = "点一下，记住价格",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+            }
+        }
         TextButton(onClick = onToggleFullScreen) {
             Text(
                 text = if (fullScreenList) "返回" else "全屏",
@@ -370,6 +415,17 @@ private fun TopBar(
 
 @Composable
 private fun OcrStatusPill(captureStarted: Boolean) {
+    // 就绪时绿点呼吸：与悬浮球识别成功的绿勾同频
+    val transition = rememberInfiniteTransition(label = "status-dot")
+    val breathe by transition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "breathe"
+    )
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center
@@ -387,12 +443,24 @@ private fun OcrStatusPill(captureStarted: Boolean) {
             Box(
                 modifier = Modifier
                     .size(7.dp)
+                    .graphicsLayer {
+                        if (captureStarted) {
+                            scaleX = 0.8f + 0.35f * breathe
+                            scaleY = 0.8f + 0.35f * breathe
+                        }
+                    }
                     .clip(CircleShape)
-                    .background(if (captureStarted) FreshGreen else TextSecondary)
+                    .background(
+                        if (captureStarted) {
+                            FreshGreen.copy(alpha = 0.55f + 0.45f * breathe)
+                        } else {
+                            TextSecondary
+                        }
+                    )
             )
             Spacer(modifier = Modifier.width(7.dp))
             Text(
-                text = if (captureStarted) "OCR 已就绪" else "等待启动 OCR",
+                text = if (captureStarted) "悬浮球已就绪，去拼多多点它" else "等待启动悬浮球",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = if (captureStarted) FreshGreen else TextSecondary
@@ -406,40 +474,84 @@ private fun OcrStartCard(
     onStartCapture: () -> Unit,
     debugMessage: String
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.97f else 1f,
+        animationSpec = tween(durationMillis = 140),
+        label = "press"
+    )
+    // 流光：一道柔和高光每 3.2 秒从左向右扫过一次
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val shimmerProgress by transition.animateFloat(
+        initialValue = -0.35f,
+        targetValue = 1.35f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 3200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "shimmer"
+    )
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            },
         onClick = onStartCapture,
+        interactionSource = interactionSource,
         colors = CardDefaults.cardColors(containerColor = BrandRed),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = "启动悬浮球",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "去拼多多商品页，点一下悬浮球就能记住价格",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.92f)
-            )
-            if (debugMessage.isNotBlank()) {
-                Spacer(modifier = Modifier.height(8.dp))
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
-                    text = debugMessage,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.72f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    text = "启动悬浮球",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
                 )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "去拼多多商品页，点一下悬浮球就能记住价格",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.92f)
+                )
+                if (debugMessage.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = debugMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.72f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            // 流光层：斜向白色高光带
+            Canvas(modifier = Modifier.matchParentSize()) {
+                val bandWidth = size.width * 0.28f
+                val centerX = size.width * shimmerProgress
+                translate(left = centerX - bandWidth / 2f) {
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color.White.copy(alpha = 0.14f),
+                                Color.Transparent
+                            )
+                        ),
+                        size = size.copy(width = bandWidth)
+                    )
+                }
             }
         }
     }
@@ -455,14 +567,20 @@ private fun StatCards(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        StatCard(title = "今日记录", value = "$todayCount 件")
-        StatCard(title = "在记商品", value = "$productCount 件")
-        StatCard(title = "有价格变动", value = "$updatedCount 件")
+        StatCard(title = "今日记录", value = todayCount, accent = true)
+        StatCard(title = "在记商品", value = productCount)
+        StatCard(title = "有价格变动", value = updatedCount)
     }
 }
 
 @Composable
-private fun RowScope.StatCard(title: String, value: String) {
+private fun RowScope.StatCard(title: String, value: Int, accent: Boolean = false) {
+    // 数字变化时滚动过渡，而不是生硬跳变
+    val animatedValue by animateIntAsState(
+        targetValue = value,
+        animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing),
+        label = "stat-$title"
+    )
     Card(
         modifier = Modifier.weight(1f),
         colors = CardDefaults.cardColors(containerColor = CardWhite),
@@ -482,10 +600,10 @@ private fun RowScope.StatCard(title: String, value: String) {
             )
             Spacer(modifier = Modifier.height(5.dp))
             Text(
-                text = value,
+                text = "$animatedValue 件",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                color = TextPrimary
+                color = if (accent) BrandRed else TextPrimary
             )
         }
     }
@@ -564,15 +682,93 @@ private fun EmptyState(searchQuery: String) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = CardWhite),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
+        if (searchQuery.isBlank()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 20.dp)
+            ) {
+                Text(
+                    text = "三步开始记价",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                GuideStep(index = 1, text = "点上方红色卡片，启动悬浮球")
+                GuideStep(index = 2, text = "打开拼多多，进入想记价的商品页")
+                GuideStep(index = 3, text = "点一下悬浮球，价格自动存进来", isLast = true)
+            }
+        } else {
+            Text(
+                text = "没有找到匹配的商品。",
+                modifier = Modifier.padding(18.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuideStep(index: Int, text: String, isLast: Boolean = false) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .background(BrandRedSoft, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "$index",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = BrandRed
+                )
+            }
+            if (!isLast) {
+                Box(
+                    modifier = Modifier
+                        .width(1.5.dp)
+                        .height(18.dp)
+                        .background(Color(0xFFF0D5D3))
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
         Text(
-            text = if (searchQuery.isBlank()) "还没有保存商品，先去拼多多点悬浮球识别一次。" else "没有找到匹配的商品。",
-            modifier = Modifier.padding(18.dp),
+            text = text,
+            modifier = Modifier.padding(bottom = if (isLast) 0.dp else 10.dp),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary
+            color = TextPrimary
         )
+    }
+}
+
+// 列表交错入场：前 8 项依次上浮淡入，之后的项直接显示（避免滚动时重播）
+@Composable
+private fun StaggeredAppearance(index: Int, content: @Composable () -> Unit) {
+    var visible by remember { mutableStateOf(index >= 8) }
+    LaunchedEffect(Unit) {
+        if (!visible) {
+            delay(index * 70L)
+            visible = true
+        }
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(durationMillis = 380)) +
+            slideInVertically(animationSpec = tween(durationMillis = 380)) { it / 6 },
+        exit = fadeOut(tween(durationMillis = 120))
+    ) {
+        content()
     }
 }
 
@@ -587,13 +783,26 @@ private fun ProductCard(
     val minPrice = history.minOfOrNull { it.priceCents } ?: item.priceCents
     val isAtLowest = item.priceCents <= minPrice
 
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.98f else 1f,
+        animationSpec = tween(durationMillis = 130),
+        label = "card-press"
+    )
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .animateContentSize(),
         onClick = onClick,
+        interactionSource = interactionSource,
         colors = CardDefaults.cardColors(containerColor = CardWhite),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
@@ -646,13 +855,36 @@ private fun ProductCard(
 
 @Composable
 private fun LowestBadge() {
-    Box(
+    // 圆点脉动：强调"现在就是最低"这个关键信号
+    val transition = rememberInfiniteTransition(label = "lowest-dot")
+    val pulse by transition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
+    Row(
         modifier = Modifier
             .background(BrandRedSoft, RoundedCornerShape(50))
-            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .graphicsLayer {
+                    scaleX = 0.75f + 0.4f * pulse
+                    scaleY = 0.75f + 0.4f * pulse
+                }
+                .clip(CircleShape)
+                .background(BrandRed.copy(alpha = 0.5f + 0.5f * pulse))
+        )
+        Spacer(modifier = Modifier.width(5.dp))
         Text(
-            text = "● 历史最低",
+            text = "历史最低",
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = BrandRed
