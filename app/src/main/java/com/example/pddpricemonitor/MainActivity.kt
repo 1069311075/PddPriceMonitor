@@ -13,6 +13,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -58,14 +61,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlin.math.max
+import kotlin.math.min
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.pddpricemonitor.capture.MonitorDebugState
@@ -744,19 +756,34 @@ private fun PriceLineChart(
     val chartPrices = if (history.isEmpty()) listOf(fallbackPrice) else history.map { it.priceCents }
     val minPrice = chartPrices.minOrNull() ?: fallbackPrice
     val maxPrice = chartPrices.maxOrNull() ?: fallbackPrice
+    val minIndex = chartPrices.indexOf(minPrice).coerceAtLeast(0)
+    val lastIndex = chartPrices.lastIndex
+
+    var revealed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { revealed = true }
+    val progress by animateFloatAsState(
+        targetValue = if (revealed) 1f else 0f,
+        animationSpec = tween(durationMillis = 900, easing = FastOutSlowInEasing)
+    )
+    val textMeasurer = rememberTextMeasurer()
+    val axisStyle = TextStyle(
+        color = TextSecondary,
+        fontSize = 9.sp,
+        fontWeight = FontWeight.Medium
+    )
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(130.dp)
             .background(Color(0xFFF5F5F7), RoundedCornerShape(12.dp))
-            .padding(12.dp)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val left = 8.dp.toPx()
             val right = size.width - 8.dp.toPx()
-            val top = 12.dp.toPx()
-            val bottom = size.height - 18.dp.toPx()
+            val top = 14.dp.toPx()
+            val bottom = size.height - 16.dp.toPx()
             val width = (right - left).coerceAtLeast(1f)
             val height = (bottom - top).coerceAtLeast(1f)
             val range = (maxPrice - minPrice).takeIf { it > 0 } ?: 1L
@@ -781,18 +808,59 @@ private fun PriceLineChart(
                 Offset(x, y)
             }
 
-            if (points.size > 1) {
-                val path = Path().apply {
-                    moveTo(points.first().x, points.first().y)
-                    points.drop(1).forEach { lineTo(it.x, it.y) }
+            val smoothPath = buildSmoothPath(points)
+
+            // 平滑曲线 + 渐变面积，随动画从左向右揭开
+            clipRect(right = left + width * progress) {
+                if (points.size > 1) {
+                    val areaPath = Path().apply {
+                        addPath(smoothPath)
+                        lineTo(points.last().x, bottom)
+                        lineTo(points.first().x, bottom)
+                        close()
+                    }
+                    drawPath(
+                        path = areaPath,
+                        brush = Brush.verticalGradient(
+                            0.0f to Color(0x38E02E24),
+                            1f to Color(0x00E02E24)
+                        )
+                    )
+                    drawPath(
+                        path = smoothPath,
+                        color = BrandRed,
+                        style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
+                    )
                 }
-                drawPath(path = path, color = BrandRed, style = Stroke(width = 3.dp.toPx()))
+                // 历史最低点：绿点 + 柔和光晕
+                if (points.size > 1 && minIndex <= lastIndex) {
+                    val minPoint = points[minIndex]
+                    drawCircle(Color(0x1A1DC981), radius = 10.dp.toPx(), center = minPoint)
+                    drawCircle(Color(0xFF1DC981), radius = 4.dp.toPx(), center = minPoint)
+                    drawCircle(Color.White, radius = 1.6.dp.toPx(), center = minPoint)
+                }
+                // 当前点：品牌红 + 光晕，视觉焦点
+                if (points.isNotEmpty()) {
+                    val lastPoint = points[lastIndex]
+                    drawCircle(Color(0x33E02E24), radius = 11.dp.toPx(), center = lastPoint)
+                    drawCircle(BrandRed, radius = 5.dp.toPx(), center = lastPoint)
+                    drawCircle(Color.White, radius = 2.dp.toPx(), center = lastPoint)
+                }
             }
 
-            points.forEach { point ->
-                drawCircle(color = Color.White, radius = 5.dp.toPx(), center = point)
-                drawCircle(color = BrandRed, radius = 3.2.dp.toPx(), center = point)
-            }
+            // 纵轴价格标注，随动画淡入
+            drawText(
+                textMeasurer = textMeasurer,
+                text = formatPrice(maxPrice),
+                topLeft = Offset(left, 0f),
+                style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
+            )
+            drawText(
+                textMeasurer = textMeasurer,
+                text = formatPrice(minPrice),
+                topLeft = Offset(left, size.height - 14.dp.toPx()),
+                style = axisStyle.copy(color = Color(0xFF1DC981).copy(alpha = progress))
+            )
         }
         if (history.size <= 1) {
             Text(
@@ -803,6 +871,28 @@ private fun PriceLineChart(
             )
         }
     }
+}
+
+private fun buildSmoothPath(points: List<Offset>): Path {
+    val path = Path()
+    if (points.isEmpty()) return path
+    path.moveTo(points.first().x, points.first().y)
+    if (points.size < 3) {
+        for (i in 1 until points.size) path.lineTo(points[i].x, points[i].y)
+        return path
+    }
+    for (i in 0 until points.size - 1) {
+        val p0 = points[max(0, i - 1)]
+        val p1 = points[i]
+        val p2 = points[i + 1]
+        val p3 = points[min(points.size - 1, i + 2)]
+        path.cubicTo(
+            p1.x + (p2.x - p0.x) / 6f, p1.y + (p2.y - p0.y) / 6f,
+            p2.x - (p3.x - p1.x) / 6f, p2.y - (p3.y - p1.y) / 6f,
+            p2.x, p2.y
+        )
+    }
+    return path
 }
 
 private fun formatPrice(cents: Long): String =
