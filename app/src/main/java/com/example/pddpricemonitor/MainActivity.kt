@@ -282,8 +282,11 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
         AnimatedVisibility(visible = !fullScreenList) {
             Column {
                 Spacer(modifier = Modifier.height(12.dp))
-                OcrStatusPill(captureStarted = captureStarted)
-                Spacer(modifier = Modifier.height(14.dp))
+                // 未启动时显示状态胶囊（引导启动），启动后只保留红色卡片，避免信息重复
+                if (!captureStarted) {
+                    OcrStatusPill(captureStarted = captureStarted)
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
                 OcrStartCard(
                     onStartCapture = {
                         if (Settings.canDrawOverlays(context)) {
@@ -297,7 +300,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel) {
                             )
                         }
                     },
-                    debugMessage = debugInfo.message
+                    debugMessage = debugInfo.message,
+                    captureStarted = captureStarted
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 StatCards(
@@ -490,7 +494,8 @@ private fun OcrStatusPill(captureStarted: Boolean) {
 @Composable
 private fun OcrStartCard(
     onStartCapture: () -> Unit,
-    debugMessage: String
+    debugMessage: String,
+    captureStarted: Boolean
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -499,7 +504,7 @@ private fun OcrStartCard(
         animationSpec = tween(durationMillis = 140),
         label = "press"
     )
-    // 流光：一道柔和高光每 3.2 秒从左向右扫过一次
+    // 流光：一道柔和高光每 3.2 秒从左向右扫过一次（仅未启动时显示）
     val transition = rememberInfiniteTransition(label = "shimmer")
     val shimmerProgress by transition.animateFloat(
         initialValue = -0.35f,
@@ -528,47 +533,71 @@ private fun OcrStartCard(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                    .padding(horizontal = 18.dp, vertical = if (captureStarted) 14.dp else 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "启动悬浮球",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "去拼多多商品页，点一下悬浮球就能记住价格",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.92f)
-                )
-                if (debugMessage.isNotBlank()) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                if (captureStarted) {
+                    // 已启动状态：简洁一行，不再重复"已就绪"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "悬浮球运行中 · 去拼多多点它",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White
+                        )
+                    }
+                    if (debugMessage.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = debugMessage,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.78f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                } else {
                     Text(
-                        text = debugMessage,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White.copy(alpha = 0.72f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        text = "启动悬浮球",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "去拼多多商品页，点一下悬浮球就能记住价格",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.92f)
+                    )
+                    if (debugMessage.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = debugMessage,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.72f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
-            // 流光层：斜向白色高光带
-            Canvas(modifier = Modifier.matchParentSize()) {
-                val bandWidth = size.width * 0.28f
-                val centerX = size.width * shimmerProgress
-                translate(left = centerX - bandWidth / 2f) {
-                    drawRect(
-                        brush = Brush.horizontalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                Color.White.copy(alpha = 0.14f),
-                                Color.Transparent
-                            )
-                        ),
-                        size = size.copy(width = bandWidth)
-                    )
+            // 流光层：仅未启动时显示，避免视觉过载
+            if (!captureStarted) {
+                Canvas(modifier = Modifier.matchParentSize()) {
+                    val bandWidth = size.width * 0.28f
+                    val centerX = size.width * shimmerProgress
+                    translate(left = centerX - bandWidth / 2f) {
+                        drawRect(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.White.copy(alpha = 0.14f),
+                                    Color.Transparent
+                                )
+                            ),
+                            size = size.copy(width = bandWidth)
+                        )
+                    }
                 }
             }
         }
@@ -624,13 +653,23 @@ private fun RowScope.StatColumn(title: String, value: Int, accent: Boolean = fal
             color = TextSecondary
         )
         Spacer(modifier = Modifier.height(5.dp))
-        Text(
-            text = "$animatedValue 件",
-            fontSize = 22.sp,
-            fontFamily = SerifItalic,
-            fontWeight = FontWeight.Bold,
-            color = if (accent) BrandRed else TextPrimary
-        )
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                text = "$animatedValue",
+                fontSize = 22.sp,
+                fontFamily = SerifItalic,
+                fontWeight = FontWeight.Bold,
+                color = if (accent) BrandRed else TextPrimary
+            )
+            Spacer(modifier = Modifier.width(2.dp))
+            Text(
+                text = "件",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (accent) BrandRed else TextSecondary,
+                modifier = Modifier.padding(bottom = 2.dp)
+            )
+        }
     }
 }
 
@@ -902,9 +941,16 @@ private fun ProductCard(
                     Spacer(modifier = Modifier.height(3.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "最低 ${formatPrice(minPrice)}",
+                            text = "最低",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = formatPrice(minPrice),
                             style = MaterialTheme.typography.labelMedium,
                             fontFamily = SerifItalic,
+                            fontWeight = FontWeight.SemiBold,
                             color = TextSecondary
                         )
                         if (previousPrice != null && previousPrice != item.priceCents) {
@@ -1084,7 +1130,7 @@ private fun ProductHistoryDetail(
             color = TextPrimary
         )
     }
-    Spacer(modifier = Modifier.height(6.dp))
+    Spacer(modifier = Modifier.height(10.dp))
 
     val allReversed = history.asReversed()
     val displayed = if (showAll) allReversed else allReversed.take(8)
@@ -1095,7 +1141,7 @@ private fun ProductHistoryDetail(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 5.dp),
+                .padding(vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -1155,6 +1201,7 @@ private fun RowScope.StatPill(label: String, value: String, highlight: Boolean =
             style = MaterialTheme.typography.labelSmall,
             color = TextSecondary
         )
+        Spacer(modifier = Modifier.height(3.dp))
         Text(
             text = value,
             style = MaterialTheme.typography.bodySmall,
@@ -1336,13 +1383,18 @@ private fun PriceLineChart(
                 }
             }
 
-            // 最高价标注（左上）
-            drawText(
-                textMeasurer = textMeasurer,
-                text = formatPrice(maxPrice),
-                topLeft = Offset(left, 0f),
-                style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
-            )
+            // 最高价标注（左上，仅当最高价明显高于当前价时显示，避免重叠）
+            val priceRangeRatio = if (maxPrice > minPrice) {
+                (maxPrice - chartPrices[lastIndex]).toFloat() / (maxPrice - minPrice).toFloat()
+            } else 0f
+            if (priceRangeRatio > 0.15f) {
+                drawText(
+                    textMeasurer = textMeasurer,
+                    text = formatPrice(maxPrice),
+                    topLeft = Offset(left, 0f),
+                    style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
+                )
+            }
 
             // 当前点价格标注（红色，点位上方）
             if (points.isNotEmpty()) {
@@ -1362,22 +1414,37 @@ private fun PriceLineChart(
                 )
             }
 
-            // 最低价标注（绿色，点位上方；与当前点重合时不重复标）
+            // 最低价标注（绿色，点位上方；与当前点重合或水平过近时不显示，避免重叠）
             if (points.size > 1 && minIndex != lastIndex) {
                 val minPoint = points[minIndex]
+                val lastPoint = points[lastIndex]
+                // 计算两点水平距离，小于 28dp 则认为会重叠
                 val minLabel = textMeasurer.measure(
                     text = formatPrice(minPrice),
                     style = pointLabelStyle.copy(color = FreshGreen)
                 )
-                drawText(
-                    textLayoutResult = minLabel,
-                    topLeft = Offset(
-                        (minPoint.x - minLabel.size.width / 2f)
-                            .coerceIn(left, (right - minLabel.size.width).coerceAtLeast(left)),
-                        (minPoint.y - minLabel.size.height - 7.dp.toPx()).coerceAtLeast(0f)
-                    ),
-                    alpha = progress
+                val lastLabel = textMeasurer.measure(
+                    text = formatPrice(chartPrices[lastIndex]),
+                    style = pointLabelStyle.copy(color = BrandRed)
                 )
+                val minLabelCenterX = minPoint.x
+                val lastLabelCenterX = lastPoint.x
+                val minLabelHalfW = minLabel.size.width / 2f + 4.dp.toPx()
+                val lastLabelHalfW = lastLabel.size.width / 2f + 4.dp.toPx()
+                val distance = kotlin.math.abs(minLabelCenterX - lastLabelCenterX)
+                val willOverlap = distance < (minLabelHalfW + lastLabelHalfW)
+
+                if (!willOverlap) {
+                    drawText(
+                        textLayoutResult = minLabel,
+                        topLeft = Offset(
+                            (minPoint.x - minLabel.size.width / 2f)
+                                .coerceIn(left, (right - minLabel.size.width).coerceAtLeast(left)),
+                            (minPoint.y - minLabel.size.height - 7.dp.toPx()).coerceAtLeast(0f)
+                        ),
+                        alpha = progress
+                    )
+                }
             }
 
             // 首尾日期标注（底部两角），给出时间参照
