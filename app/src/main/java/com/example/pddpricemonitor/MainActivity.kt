@@ -1383,109 +1383,103 @@ private fun PriceLineChart(
                 }
             }
 
-            // 最高价标注（左上，仅当最高价明显高于当前价时显示，避免重叠）
+            // ---- 标签避让容器：所有文字统一走这里，杜绝相互重叠 ----
+            val placedRects = mutableListOf<Pair<Float, Float>>()
+            val placedSizes = mutableListOf<Pair<Float, Float>>()
+            fun overlaps(aX: Float, aY: Float, aW: Float, aH: Float,
+                          bX: Float, bY: Float, bW: Float, bH: Float): Boolean =
+                aX < bX + bW && aX + aW > bX && aY < bY + bH && aY + aH > bY
+            fun canPlace(x: Float, y: Float, w: Float, h: Float): Boolean {
+                for (i in placedRects.indices) {
+                    val (px, py) = placedRects[i]
+                    val (pw, ph) = placedSizes[i]
+                    if (overlaps(x, y, w, h, px, py, pw, ph)) return false
+                }
+                return true
+            }
+            fun commitLabel(x: Float, y: Float, w: Float, h: Float) {
+                placedRects.add(x to y)
+                placedSizes.add(w to h)
+            }
+
+            // 首尾日期（底部两角）：固定位先占，避免价格标签下沉盖住日期
+            if (history.size > 1) {
+                val firstDate = textMeasurer.measure(
+                    text = chartDate(history.first().recordedAt),
+                    style = axisStyle
+                )
+                val lastDate = textMeasurer.measure(
+                    text = chartDate(history.last().recordedAt),
+                    style = axisStyle
+                )
+                val dateY = size.height - 13.dp.toPx()
+                val firstX = left
+                val lastX = right - lastDate.size.width.toFloat()
+                commitLabel(firstX, dateY, firstDate.size.width.toFloat(), firstDate.size.height.toFloat())
+                commitLabel(lastX, dateY, lastDate.size.width.toFloat(), lastDate.size.height.toFloat())
+                drawText(textLayoutResult = firstDate, topLeft = Offset(firstX, dateY), alpha = progress)
+                drawText(textLayoutResult = lastDate, topLeft = Offset(lastX, dateY), alpha = progress)
+            }
+
+            // 最高价轴标注（左上角，仅当最高价明显高于当前价时显示）
             val priceRangeRatio = if (maxPrice > minPrice) {
                 (maxPrice - chartPrices[lastIndex]).toFloat() / (maxPrice - minPrice).toFloat()
             } else 0f
             if (priceRangeRatio > 0.15f) {
-                drawText(
-                    textMeasurer = textMeasurer,
+                val maxLabel = textMeasurer.measure(
                     text = formatPrice(maxPrice),
-                    topLeft = Offset(left, 0f),
-                    style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
+                    style = axisStyle
                 )
+                commitLabel(left, 0f, maxLabel.size.width.toFloat(), maxLabel.size.height.toFloat())
+                drawText(textLayoutResult = maxLabel, topLeft = Offset(left, 0f), alpha = progress)
             }
 
-            // 当前点价格标注（红色，点位上方）
-            if (points.isNotEmpty()) {
-                val lastPoint = points[lastIndex]
-                val lastLabel = textMeasurer.measure(
-                    text = formatPrice(chartPrices[lastIndex]),
-                    style = pointLabelStyle.copy(color = BrandRed)
+            // 点位价格标签：优先放点位上方，冲突则放下方，仍冲突则不画
+            fun placePointLabel(price: Long, color: Color, anchor: Offset) {
+                val label = textMeasurer.measure(
+                    text = formatPrice(price),
+                    style = pointLabelStyle.copy(color = color)
                 )
-                drawText(
-                    textLayoutResult = lastLabel,
-                    topLeft = Offset(
-                        (lastPoint.x - lastLabel.size.width / 2f)
-                            .coerceIn(left, (right - lastLabel.size.width).coerceAtLeast(left)),
-                        (lastPoint.y - lastLabel.size.height - 7.dp.toPx()).coerceAtLeast(0f)
-                    ),
-                    alpha = progress
+                val w = label.size.width.toFloat()
+                val h = label.size.height.toFloat()
+                val gap = 7.dp.toPx()
+                val candidates = listOf(
+                    Offset(anchor.x, anchor.y - h - gap),
+                    Offset(anchor.x, anchor.y + gap)
                 )
-            }
-
-            // 最低价标注（绿色，点位上方；与当前点重合或水平过近时不显示，避免重叠）
-            if (points.size > 1 && minIndex != lastIndex) {
-                val minPoint = points[minIndex]
-                val lastPoint = points[lastIndex]
-                // 计算两点水平距离，小于 28dp 则认为会重叠
-                val minLabel = textMeasurer.measure(
-                    text = formatPrice(minPrice),
-                    style = pointLabelStyle.copy(color = FreshGreen)
-                )
-                val lastLabel = textMeasurer.measure(
-                    text = formatPrice(chartPrices[lastIndex]),
-                    style = pointLabelStyle.copy(color = BrandRed)
-                )
-                val minLabelCenterX = minPoint.x
-                val lastLabelCenterX = lastPoint.x
-                val minLabelHalfW = minLabel.size.width / 2f + 4.dp.toPx()
-                val lastLabelHalfW = lastLabel.size.width / 2f + 4.dp.toPx()
-                val distance = kotlin.math.abs(minLabelCenterX - lastLabelCenterX)
-                val willOverlap = distance < (minLabelHalfW + lastLabelHalfW)
-
-                if (!willOverlap) {
-                    drawText(
-                        textLayoutResult = minLabel,
-                        topLeft = Offset(
-                            (minPoint.x - minLabel.size.width / 2f)
-                                .coerceIn(left, (right - minLabel.size.width).coerceAtLeast(left)),
-                            (minPoint.y - minLabel.size.height - 7.dp.toPx()).coerceAtLeast(0f)
-                        ),
-                        alpha = progress
-                    )
+                for (cand in candidates) {
+                    val x = (cand.x - w / 2f).coerceIn(left, (right - w).coerceAtLeast(left))
+                    val y = cand.y.coerceIn(0f, (size.height - h).coerceAtLeast(0f))
+                    if (canPlace(x, y, w, h)) {
+                        commitLabel(x, y, w, h)
+                        drawText(textLayoutResult = label, topLeft = Offset(x, y), alpha = progress)
+                        return
+                    }
                 }
             }
 
-            // 首尾日期标注（底部两角），给出时间参照
-            if (history.size > 1) {
-                drawText(
-                    textMeasurer = textMeasurer,
-                    text = chartDate(history.first().recordedAt),
-                    topLeft = Offset(left, size.height - 13.dp.toPx()),
-                    style = axisStyle.copy(color = TextSecondary.copy(alpha = progress))
-                )
-                val lastDateLabel = textMeasurer.measure(
-                    text = chartDate(history.last().recordedAt),
-                    style = axisStyle
-                )
-                drawText(
-                    textLayoutResult = lastDateLabel,
-                    topLeft = Offset(
-                        right - lastDateLabel.size.width,
-                        size.height - 13.dp.toPx()
-                    ),
-                    alpha = progress
-                )
+            // 当前价（红）与历史最低（绿）的常驻标签
+            if (points.isNotEmpty()) {
+                placePointLabel(chartPrices[lastIndex], BrandRed, points[lastIndex])
+            }
+            if (points.size > 1 && minIndex != lastIndex) {
+                placePointLabel(minPrice, FreshGreen, points[minIndex])
             }
 
-            // 选中点：竖直引导线 + 放大高亮 + 价格/时间气泡
+            // 选中点：竖直引导线 + 放大高亮 + 价格/时间气泡（气泡避让所有标签）
             val sel = selectedIndex
             if (sel != null && sel in points.indices && history.size > 1) {
                 val selPoint = points[sel]
-                // 竖直引导线：从选中点垂直到底部，标明对应横轴位置
                 drawLine(
                     color = BrandRed.copy(alpha = 0.35f),
                     start = Offset(selPoint.x, selPoint.y),
                     end = Offset(selPoint.x, bottom),
                     strokeWidth = 1.dp.toPx()
                 )
-                // 放大高亮选中点
                 drawCircle(Color(0x33E02E24), radius = 9.dp.toPx(), center = selPoint)
                 drawCircle(BrandRed, radius = 4.5.dp.toPx(), center = selPoint)
                 drawCircle(Color.White, radius = 1.8.dp.toPx(), center = selPoint)
 
-                // 气泡：价格 + 时间
                 val content = "${formatPrice(chartPrices[sel])} · ${chartDateTime(history[sel].recordedAt)}"
                 val bubbleText = textMeasurer.measure(
                     text = content,
@@ -1497,26 +1491,38 @@ private fun PriceLineChart(
                 )
                 val padX = 8.dp.toPx()
                 val padY = 5.dp.toPx()
-                val bubbleW = bubbleText.size.width + padX * 2
-                val bubbleH = bubbleText.size.height + padY * 2
-                val bubbleX = (selPoint.x - bubbleW / 2f)
-                    .coerceIn(left, (right - bubbleW).coerceAtLeast(left))
-                val placeBelow = selPoint.y - bubbleH - 10.dp.toPx() < top
-                val bubbleY = if (placeBelow) {
-                    selPoint.y + 10.dp.toPx()
+                val bubbleW = bubbleText.size.width.toFloat() + padX * 2
+                val bubbleH = bubbleText.size.height.toFloat() + padY * 2
+                val aboveY = selPoint.y - bubbleH - 10.dp.toPx()
+                val candidates = if (aboveY < top) {
+                    listOf(
+                        Offset(selPoint.x, selPoint.y + 10.dp.toPx()),
+                        Offset(selPoint.x, aboveY)
+                    )
                 } else {
-                    selPoint.y - bubbleH - 10.dp.toPx()
+                    listOf(
+                        Offset(selPoint.x, aboveY),
+                        Offset(selPoint.x, selPoint.y + 10.dp.toPx())
+                    )
                 }
-                drawRoundRect(
-                    color = Color(0xE61A1A1A),
-                    topLeft = Offset(bubbleX, bubbleY),
-                    size = Size(bubbleW, bubbleH),
-                    cornerRadius = CornerRadius(6.dp.toPx())
-                )
-                drawText(
-                    textLayoutResult = bubbleText,
-                    topLeft = Offset(bubbleX + padX, bubbleY + padY)
-                )
+                for (cand in candidates) {
+                    val x = (cand.x - bubbleW / 2f).coerceIn(left, (right - bubbleW).coerceAtLeast(left))
+                    val y = cand.y.coerceIn(0f, (size.height - bubbleH).coerceAtLeast(0f))
+                    if (canPlace(x, y, bubbleW, bubbleH)) {
+                        commitLabel(x, y, bubbleW, bubbleH)
+                        drawRoundRect(
+                            color = Color(0xE61A1A1A),
+                            topLeft = Offset(x, y),
+                            size = Size(bubbleW, bubbleH),
+                            cornerRadius = CornerRadius(6.dp.toPx())
+                        )
+                        drawText(
+                            textLayoutResult = bubbleText,
+                            topLeft = Offset(x + padX, y + padY)
+                        )
+                        break
+                    }
+                }
             }
         }
         if (history.size <= 1) {

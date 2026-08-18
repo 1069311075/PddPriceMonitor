@@ -1,5 +1,9 @@
 ﻿package com.example.pddpricemonitor.capture
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.AnimatorSet
+import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -26,6 +30,9 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -76,6 +83,12 @@ class ScreenCaptureService : Service() {
     private var ballText: TextView? = null
     private var ballRing: View? = null
     private var ringAnimator: ValueAnimator? = null
+    private var ringFadeAnimator: ValueAnimator? = null
+    private var ringFadeLevel = 0f
+    private var pulseProgress = 0f
+    private var ballColorAnimator: ValueAnimator? = null
+    private var currentBallColor = BrandRed
+    private var glyphAnimator: AnimatorSet? = null
     private var resultPanel: LinearLayout? = null
     private var titleEdit: EditText? = null
     private var priceEdit: EditText? = null
@@ -522,6 +535,18 @@ class ScreenCaptureService : Service() {
         }.onFailure { error ->
             overlayView = null
             MonitorDebugState.update("悬浮球创建失败：${error.javaClass.simpleName}")
+        }.onSuccess {
+            // 入场：淡入 + 弹性放大，悬浮球不再凭空蹦出来
+            ballWrap.alpha = 0f
+            ballWrap.scaleX = 0.6f
+            ballWrap.scaleY = 0.6f
+            ballWrap.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .setDuration(340L)
+                .setInterpolator(OvershootInterpolator(1.1f))
+                .start()
         }
     }
 
@@ -661,7 +686,7 @@ class ScreenCaptureService : Service() {
             titleEdit?.setText(product.title)
             priceEdit?.setText(formatPlainPrice(product.priceCents))
             updateComparisonText(product.priceCents)
-            resultPanel?.visibility = View.VISIBLE
+            showPanelAnimated()
             overlayView?.post { keepOverlayInsideGestureArea() }
         }
         scheduleAutoCollapse()
@@ -672,10 +697,10 @@ class ScreenCaptureService : Service() {
         val strip = comparisonStrip ?: return
         val current = currentPriceCents
         if (current == null) {
-            strip.visibility = View.GONE
+            setStripVisible(false)
             return
         }
-        strip.visibility = View.VISIBLE
+        setStripVisible(true)
         val comparison = currentComparison
         if (comparison == null) {
             applyComparisonStyle(BrandRedSoft, BrandRed)
@@ -703,6 +728,26 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    // 对比条显隐：带淡入淡出，避免打字改价时颜色条突然跳变
+    private fun setStripVisible(visible: Boolean) {
+        val strip = comparisonStrip ?: return
+        if (visible) {
+            if (strip.visibility == View.VISIBLE) return
+            strip.animate().cancel()
+            strip.alpha = 0f
+            strip.visibility = View.VISIBLE
+            strip.animate().alpha(1f).setDuration(180L).start()
+        } else {
+            if (strip.visibility != View.VISIBLE) return
+            strip.animate().cancel()
+            strip.animate()
+                .alpha(0f)
+                .setDuration(150L)
+                .withEndAction { strip.visibility = View.GONE }
+                .start()
+        }
+    }
+
     private fun applyComparisonStyle(backgroundColor: Int, dotColor: Int) {
         comparisonStrip?.background = GradientDrawable().apply {
             cornerRadius = dp(10).toFloat()
@@ -715,7 +760,7 @@ class ScreenCaptureService : Service() {
         withContext(Dispatchers.Main) {
             val wasPanelVisible = resultPanel?.visibility == View.VISIBLE
             setBallState(state)
-            resultPanel?.visibility = if (showPanel) View.VISIBLE else View.GONE
+            if (showPanel) showPanelAnimated() else hidePanelAnimated()
             setOverlayEditingMode(showPanel)
             if (wasPanelVisible && !showPanel) {
                 overlayView?.post { restoreCollapsedOverlayPosition() }
@@ -723,54 +768,171 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    // 面板出现：淡入 + 轻微上浮回正，替代生硬的瞬间出现
+    private fun showPanelAnimated() {
+        val panel = resultPanel ?: return
+        if (panel.visibility == View.VISIBLE) return
+        panel.animate().cancel()
+        panel.alpha = 0f
+        panel.translationY = dp(10).toFloat()
+        panel.scaleX = 0.97f
+        panel.scaleY = 0.97f
+        panel.visibility = View.VISIBLE
+        panel.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(260L)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
+    }
+
+    private fun hidePanelAnimated() {
+        val panel = resultPanel ?: return
+        if (panel.visibility != View.VISIBLE) return
+        panel.animate().cancel()
+        panel.animate()
+            .alpha(0f)
+            .translationY(dp(6).toFloat())
+            .scaleX(0.98f)
+            .scaleY(0.98f)
+            .setDuration(170L)
+            .setInterpolator(AccelerateInterpolator())
+            .withEndAction { panel.visibility = View.GONE }
+            .start()
+    }
+
     private fun setBallState(state: BallState) {
         val label = ballText ?: return
         when (state) {
             BallState.IDLE -> {
                 stopRingPulse()
-                label.text = "¥"
-                label.background = circleBackground(BrandRed)
+                swapBallGlyph("¥")
+                animateBallColor(BrandRed)
             }
             BallState.SCANNING -> {
-                label.text = "¥"
-                label.background = circleBackground(BrandRed)
+                swapBallGlyph("¥")
+                animateBallColor(BrandRed)
                 startRingPulse()
             }
             BallState.SUCCESS -> {
                 stopRingPulse()
-                label.text = "✓"
-                label.background = circleBackground(FreshGreen)
+                swapBallGlyph("✓")
+                animateBallColor(FreshGreen)
             }
             BallState.ERROR -> {
                 stopRingPulse()
-                label.text = "!"
-                label.background = circleBackground(TextSecondary)
+                swapBallGlyph("!")
+                animateBallColor(TextSecondary)
             }
         }
     }
 
-    // 识别中：光圈脉冲，1.3s 一次，与呼吸感动效同一量级
+    // 球体换色：ArgbEvaluator 平滑过渡，避免红绿瞬跳
+    private fun animateBallColor(target: Int) {
+        val label = ballText ?: return
+        if (currentBallColor == target) return
+        ballColorAnimator?.cancel()
+        ballColorAnimator = ValueAnimator.ofObject(ArgbEvaluator(), currentBallColor, target).apply {
+            duration = 320L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                currentBallColor = animator.animatedValue as Int
+                (label.background as? GradientDrawable)?.setColor(currentBallColor)
+            }
+            start()
+        }
+    }
+
+    // 球面字符切换：先收缩换字，再带一点弹性回弹，告别生硬瞬变
+    private fun swapBallGlyph(newText: String) {
+        val label = ballText ?: return
+        if (label.text.toString() == newText) return
+        glyphAnimator?.cancel()
+        val shrink = ValueAnimator.ofFloat(label.scaleX, 0.6f).apply {
+            duration = 110L
+            interpolator = AccelerateInterpolator()
+            addUpdateListener { animator ->
+                val scale = animator.animatedValue as Float
+                label.scaleX = scale
+                label.scaleY = scale
+            }
+        }
+        val expand = ValueAnimator.ofFloat(0.6f, 1f).apply {
+            duration = 260L
+            interpolator = OvershootInterpolator(1.5f)
+            addUpdateListener { animator ->
+                val scale = animator.animatedValue as Float
+                label.scaleX = scale
+                label.scaleY = scale
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationStart(animation: Animator) {
+                    label.text = newText
+                }
+            })
+        }
+        AnimatorSet().apply {
+            playSequentially(shrink, expand)
+            glyphAnimator = this
+            start()
+        }
+    }
+
+    // 识别中：光圈呼吸脉冲；ringFadeLevel 控制整体淡入淡出，消除突然出现/消失
     private fun startRingPulse() {
         val ring = ballRing ?: return
-        stopRingPulse()
+        ringAnimator?.cancel()
+        ringFadeAnimator?.cancel()
         ringAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 1_300L
+            duration = 650L
             repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
             addUpdateListener { animator ->
-                val progress = animator.animatedValue as Float
-                val scale = 0.78f + progress * 0.4f
-                ring.scaleX = scale
-                ring.scaleY = scale
-                ring.alpha = (1f - progress) * 0.65f
+                pulseProgress = animator.animatedValue as Float
+                applyRingVisual(ring)
+            }
+            start()
+        }
+        ringFadeAnimator = ValueAnimator.ofFloat(ringFadeLevel, 1f).apply {
+            duration = 240L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                ringFadeLevel = animator.animatedValue as Float
+                applyRingVisual(ring)
             }
             start()
         }
     }
 
     private fun stopRingPulse() {
-        ringAnimator?.cancel()
-        ringAnimator = null
-        ballRing?.alpha = 0f
+        val ring = ballRing ?: return
+        ringFadeAnimator?.cancel()
+        ringFadeAnimator = ValueAnimator.ofFloat(ringFadeLevel, 0f).apply {
+            duration = 240L
+            addUpdateListener { animator ->
+                ringFadeLevel = animator.animatedValue as Float
+                applyRingVisual(ring)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator, isReverse: Boolean) {
+                    if (ringFadeLevel <= 0.01f) {
+                        ringAnimator?.cancel()
+                        ringAnimator = null
+                        ring.alpha = 0f
+                    }
+                }
+            })
+            start()
+        }
+    }
+
+    private fun applyRingVisual(ring: View) {
+        val scale = 0.78f + pulseProgress * 0.4f
+        ring.scaleX = scale
+        ring.scaleY = scale
+        ring.alpha = ringFadeLevel * (1f - pulseProgress) * 0.65f
     }
 
     private fun setOverlayEditingMode(enabled: Boolean) {
@@ -889,7 +1051,12 @@ class ScreenCaptureService : Service() {
     override fun onDestroy() {
         worker?.cancel()
         cancelAutoCollapse()
-        stopRingPulse()
+        ringAnimator?.cancel()
+        ringFadeAnimator?.cancel()
+        ballColorAnimator?.cancel()
+        glyphAnimator?.cancel()
+        ballRing?.animate()?.cancel()
+        resultPanel?.animate()?.cancel()
         overlayView?.let { view ->
             runCatching { windowManager?.removeView(view) }
         }
