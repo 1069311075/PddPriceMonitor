@@ -384,6 +384,13 @@ private fun TopBar(
     fullScreenList: Boolean,
     onToggleFullScreen: () -> Unit
 ) {
+    // 运行时读取真实版本号：一眼确认手机上装的是否为最新版
+    val context = LocalContext.current
+    val versionName = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: "?"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -420,7 +427,7 @@ private fun TopBar(
             )
             if (!fullScreenList) {
                 Text(
-                    text = "点一下，记住价格",
+                    text = "点一下，记住价格 · v$versionName",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary
                 )
@@ -953,10 +960,6 @@ private fun ProductCard(
                             fontWeight = FontWeight.SemiBold,
                             color = TextSecondary
                         )
-                        if (previousPrice != null && previousPrice != item.priceCents) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            PriceChangeChip(current = item.priceCents, previous = previousPrice)
-                        }
                     }
                 }
                 Column(horizontalAlignment = Alignment.End) {
@@ -970,6 +973,11 @@ private fun ProductCard(
                         color = TextSecondary
                     )
                 }
+            }
+            // 涨跌标签独占一行：与右侧徽章/条数解耦，窄屏长价格下不再挤压重叠
+            if (previousPrice != null && previousPrice != item.priceCents) {
+                Spacer(modifier = Modifier.height(6.dp))
+                PriceChangeChip(current = item.priceCents, previous = previousPrice)
             }
             }
 
@@ -1415,10 +1423,17 @@ private fun PriceLineChart(
                 val dateY = size.height - 13.dp.toPx()
                 val firstX = left
                 val lastX = right - lastDate.size.width.toFloat()
-                commitLabel(firstX, dateY, firstDate.size.width.toFloat(), firstDate.size.height.toFloat())
-                commitLabel(lastX, dateY, lastDate.size.width.toFloat(), lastDate.size.height.toFloat())
+                val firstW = firstDate.size.width.toFloat()
+                val firstH = firstDate.size.height.toFloat()
+                val lastW = lastDate.size.width.toFloat()
+                val lastH = lastDate.size.height.toFloat()
+                commitLabel(firstX, dateY, firstW, firstH)
                 drawText(textLayoutResult = firstDate, topLeft = Offset(firstX, dateY), alpha = progress)
-                drawText(textLayoutResult = lastDate, topLeft = Offset(lastX, dateY), alpha = progress)
+                // 图表过窄导致首尾日期相撞时，只保留首日期
+                if (lastX >= firstX + firstW) {
+                    commitLabel(lastX, dateY, lastW, lastH)
+                    drawText(textLayoutResult = lastDate, topLeft = Offset(lastX, dateY), alpha = progress)
+                }
             }
 
             // 最高价轴标注（左上角，仅当最高价明显高于当前价时显示）
@@ -1434,7 +1449,7 @@ private fun PriceLineChart(
                 drawText(textLayoutResult = maxLabel, topLeft = Offset(left, 0f), alpha = progress)
             }
 
-            // 点位价格标签：优先放点位上方，冲突则放下方，仍冲突则不画
+            // 点位价格标签：四个候选位依次尝试（上/下/左/右），全部冲突才放弃
             fun placePointLabel(price: Long, color: Color, anchor: Offset) {
                 val label = textMeasurer.measure(
                     text = formatPrice(price),
@@ -1445,7 +1460,9 @@ private fun PriceLineChart(
                 val gap = 7.dp.toPx()
                 val candidates = listOf(
                     Offset(anchor.x, anchor.y - h - gap),
-                    Offset(anchor.x, anchor.y + gap)
+                    Offset(anchor.x, anchor.y + gap),
+                    Offset(anchor.x - gap - w / 2f, anchor.y - h / 2f),
+                    Offset(anchor.x + gap + w / 2f, anchor.y - h / 2f)
                 )
                 for (cand in candidates) {
                     val x = (cand.x - w / 2f).coerceIn(left, (right - w).coerceAtLeast(left))
