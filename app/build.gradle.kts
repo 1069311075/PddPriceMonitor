@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+    id("com.google.dagger.hilt.android")
 }
 
 android {
@@ -15,8 +16,8 @@ android {
         applicationId = "com.example.pddpricemonitor"
         minSdk = 29
         targetSdk = 34
-        versionCode = 11
-        versionName = "0.7.4"
+        versionCode = 21
+        versionName = "0.8.8"
     }
 
     buildFeatures {
@@ -53,4 +54,11 @@ dependencies {
 
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // Hilt 依赖注入
+    implementation("com.google.dagger:hilt-android:2.52")
+    ksp("com.google.dagger:hilt-compiler:2.52")
+
+    // Hilt Navigation Compose（提供 hiltViewModel() 函数）
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
 }
