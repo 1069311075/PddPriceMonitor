@@ -527,32 +527,6 @@ class ProductTextParser {
         return title.takeIf { isLikelyTitle(it) }
     }
 
-    private fun parseListProducts(lines: List<OcrLine>): List<DetectedProduct> {
-        val candidates = mutableListOf<DetectedProduct>()
-
-        for (index in lines.indices) {
-            val line = lines[index]
-            if (isBottomOverlayLine(line)) continue
-            val price = extractPriceCents(line) ?: continue
-            if (isBadPriceContext(line.text)) continue
-
-            val title = findTitleAboveIndex(lines, index) ?: findTitleBelowIndex(lines, index) ?: continue
-            val normalized = normalizeTitle(title)
-            if (normalized.length < 4) continue
-
-            candidates += DetectedProduct(
-                title = title,
-                normalizedTitle = normalized,
-                priceCents = price,
-                rawText = line.text
-            )
-        }
-
-        return candidates
-            .distinctBy { it.normalizedTitle + ":" + it.priceCents }
-            .take(8)
-    }
-
     private fun isDetailPriceLine(line: OcrLine): Boolean {
         val text = line.text
         if (isBottomOverlayLine(line)) return false
@@ -759,38 +733,6 @@ class ProductTextParser {
         return lines
             .filter { it.rect.top in minTop..priceLine.rect.top }
             .filterNot { isBottomOverlayLine(it) }
-            .filter { isTitleCandidateLine(it) }
-            .filterNot { isTitleStopLine(it.text) }
-            .map { cleanupTitleText(it.text) }
-            .filter { isLikelyTitle(it) }
-            .maxByOrNull { titleScore(it) }
-    }
-
-    private fun findTitleAboveIndex(lines: List<OcrLine>, priceLineIndex: Int): String? {
-        val searchStart = (priceLineIndex - 4).coerceAtLeast(0)
-        val region = lines.subList(searchStart, priceLineIndex)
-            .filterNot { isBottomOverlayLine(it) }
-
-        findProductTitleBlock(region)?.let { return it }
-
-        return region
-            .filter { isTitleCandidateLine(it) }
-            .filterNot { isTitleStopLine(it.text) }
-            .map { cleanupTitleText(it.text) }
-            .filter { isLikelyTitle(it) }
-            .takeLast(2)
-            .joinToString(" ")
-            .takeIf { it.isNotBlank() }
-    }
-
-    private fun findTitleBelowIndex(lines: List<OcrLine>, priceLineIndex: Int): String? {
-        val searchEnd = (priceLineIndex + 5).coerceAtMost(lines.size)
-        val region = lines.subList(priceLineIndex + 1, searchEnd)
-            .filterNot { isBottomOverlayLine(it) }
-
-        findProductTitleBlock(region)?.let { return it }
-
-        return region
             .filter { isTitleCandidateLine(it) }
             .filterNot { isTitleStopLine(it.text) }
             .map { cleanupTitleText(it.text) }

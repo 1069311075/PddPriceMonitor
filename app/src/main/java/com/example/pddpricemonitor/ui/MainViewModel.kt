@@ -5,6 +5,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.pddpricemonitor.data.ProductPrice
 import com.example.pddpricemonitor.data.ProductPriceHistory
 import com.example.pddpricemonitor.data.ProductRepository
+import com.example.pddpricemonitor.sync.DiscoveredRoom
+import com.example.pddpricemonitor.sync.SyncController
+import com.example.pddpricemonitor.sync.SyncState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -14,10 +17,17 @@ import javax.inject.Inject
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
-    private val repository: ProductRepository
+    private val repository: ProductRepository,
+    val sync: SyncController
 ) : ViewModel() {
     val products: StateFlow<List<ProductPrice>> = repository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val syncState: StateFlow<SyncState> = sync.state
+
+    val lastSyncAt: StateFlow<Long?> = sync.lastSyncAt
+
+    val discoveredRooms: StateFlow<List<DiscoveredRoom>> = sync.discoveredRooms
 
     // 缓存每个商品的历史 StateFlow：否则每次重组都会新建冷 Flow 并重跑 Room 查询，
     // 造成持续的订阅销毁与查询抖动（CPU/内存浪费，还会让界面闪空数据）
@@ -42,4 +52,25 @@ class MainViewModel @Inject constructor(
             historyFlows.remove(productId)
         }
     }
+
+    // 删除单条历史记录；若商品历史被清空，Repository 会连商品一起删，这里同步清缓存
+    fun deleteHistoryEntry(historyId: Long, productId: Long) {
+        viewModelScope.launch {
+            repository.deleteHistoryEntry(historyId)
+        }
+    }
+
+    fun startSyncHost() = sync.startHost()
+
+    fun joinSyncHost(host: String) = sync.joinHost(host.trim())
+
+    fun disconnectSync() = sync.disconnect()
+
+    // 自动发现：仅空闲/出错状态才监听广播（主机在广播、已连接/连接中都不需要）
+    fun startDiscovery() {
+        val s = syncState.value
+        if (s is SyncState.Idle || s is SyncState.Error) sync.startRoomListening()
+    }
+
+    fun stopDiscovery() = sync.stopRoomListening()
 }
