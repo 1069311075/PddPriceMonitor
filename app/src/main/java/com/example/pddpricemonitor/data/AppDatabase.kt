@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ProductPrice::class, ProductPriceHistory::class, SyncTombstone::class],
-    version = 5,
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -94,13 +94,32 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // v6：商品表加 OCR 签名列。存量行回填 ocrTitle = title（多数用户从未编辑，
+        // 标题即 OCR 原文；编辑过的存量商品该值不准，但双路匹配中路1仍有效，无害）
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `product_prices` ADD COLUMN `ocrTitle` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE `product_prices` SET `ocrTitle` = `title`")
+            }
+        }
+
+        // v7：历史表加自动保存标记列。存量行全部为人工确认记录，回填 false
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `product_price_history` ADD COLUMN `autoSaved` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
                 AppDatabase::class.java,
                 "pdd_price_monitor.db"
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, migration4to5(context))
+                .addMigrations(
+                    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
+                    migration4to5(context), MIGRATION_5_6, MIGRATION_6_7
+                )
                 .build()
     }
 }

@@ -2,14 +2,22 @@ package com.example.pddpricemonitor.capture
 
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
-import android.animation.AnimatorSet
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.content.Context
 import android.content.Intent
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.LinearGradient
+import android.graphics.Outline
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.text.Editable
 import android.text.InputType
@@ -28,8 +36,10 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.res.ResourcesCompat
+import kotlin.math.min
 import com.example.pddpricemonitor.R
+import com.example.pddpricemonitor.compare.ClipRelayActivity
+import com.example.pddpricemonitor.compare.CompareApps
 import com.example.pddpricemonitor.data.ProductPriceComparison
 import android.os.SystemClock
 import android.util.Log
@@ -39,6 +49,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.provider.Settings
@@ -46,6 +57,7 @@ import android.provider.Settings
 // 「清爽红」设计系统：与主界面保持一致，取拼多多品牌红做记忆点
 private val BrandRed = Color.parseColor("#E02E24")
 private val BrandRedSoft = Color.parseColor("#FFF1F0")
+private val InkColor = Color.parseColor("#2E3338")
 private val FreshGreen = Color.parseColor("#1DC981")
 private val SoftGreen = Color.parseColor("#E9F9F1")
 private val CardWhite = Color.WHITE
@@ -54,7 +66,156 @@ private val TextSecondary = Color.parseColor("#8A8F99")
 private val HairlineBorder = Color.parseColor("#1A1A1A1A")
 
 /**
- * 悬浮球三态：待机红球 / 识别中脉冲光圈 / 成功绿勾（出错为灰感叹号）
+ * 边签：从屏幕边缘"长出来"的竖向小签——
+ * ① 磨砂玻璃签体（垂直渐变半透明白，内侧圆角大、贴边侧圆角小）
+ * ② 居中握柄（唯一着色元素，颜色即状态：待机墨 / 识别红 / 成功绿 / 失败灰）
+ * ③ 识别光晕（沿签体轮廓向外扩散的红环，随 pulse 呼吸）
+ * 签体贴边侧无 margin（签体压在屏幕边缘上，像从边缘长出来），内侧/上下留 margin 供光晕扩散；贴哪条边由 onRight 决定（圆角朝屏内）。
+ */
+private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Drawable() {
+
+    private var accent = initialColor
+    private var pressed = false
+    private var onRight = true
+    private var pulse = 0f
+    private var glowLevel = 0f
+
+    // 挂着识别卡片时握柄拉长，表示"签连着卡"
+    var gripExtend = 0f
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidateSelf()
+        }
+
+    private val bodyPath = Path()
+    private val glowPath = Path()
+    private val bodyRect = RectF()
+    private val glowRect = RectF()
+
+    private val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val gripPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pressPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    fun setAccentColor(newColor: Int) {
+        if (accent == newColor) return
+        accent = newColor
+        invalidateSelf()
+    }
+
+    fun setPressed(isPressed: Boolean) {
+        if (pressed == isPressed) return
+        pressed = isPressed
+        invalidateSelf()
+    }
+
+    fun setOnRight(right: Boolean) {
+        if (onRight == right) return
+        onRight = right
+        invalidateSelf()
+    }
+
+    fun setGlow(pulseValue: Float, level: Float) {
+        pulse = pulseValue
+        glowLevel = level
+        invalidateSelf()
+    }
+
+    override fun draw(canvas: Canvas) {
+        val w = bounds.width().toFloat()
+        val h = bounds.height().toFloat()
+        if (w <= 0f || h <= 0f) return
+        val m = marginPx.toFloat()
+        val tabW = w - 2f * m
+        val tabH = h - 2f * m
+        // 贴屏幕边的一侧不留 margin，签体直接压在边缘上
+        bodyRect.set(
+            if (onRight) w - tabW else 0f, m,
+            if (onRight) w else tabW, h - m
+        )
+
+        // 识别光晕：沿签体轮廓向外扩散的红环（先画，垫在签体之下）
+        if (glowLevel > 0.01f) {
+            val expand = m * (0.3f + pulse * 0.95f)
+            glowRect.set(
+                bodyRect.left - expand, bodyRect.top - expand,
+                bodyRect.right + expand, bodyRect.bottom + expand
+            )
+            val glowR = tabW * 0.5f + expand
+            glowPath.reset()
+            glowPath.addRoundRect(glowRect, cornerRadii(glowR, glowR, glowR * 0.6f), Path.Direction.CW)
+            glowPaint.style = Paint.Style.STROKE
+            glowPaint.strokeWidth = m * 0.45f
+            glowPaint.color = accent
+            glowPaint.alpha = (glowLevel * (1f - pulse) * 0.55f * 255f).toInt().coerceIn(0, 255)
+            canvas.drawPath(glowPath, glowPaint)
+        }
+
+        // 签体：磨砂玻璃（内侧大圆角、贴边侧小圆角）
+        bodyPath.reset()
+        bodyPath.addRoundRect(bodyRect, cornerRadii(tabW * 0.5f, tabW * 0.5f, tabW * 0.3f), Path.Direction.CW)
+        bodyPaint.shader = LinearGradient(
+            bodyRect.centerX(), bodyRect.top, bodyRect.centerX(), bodyRect.bottom,
+            0xE6FFFFFF.toInt(),
+            0xB8EDEDEF.toInt(),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawPath(bodyPath, bodyPaint)
+
+        // 描边：中性、低透明度
+        borderPaint.style = Paint.Style.STROKE
+        borderPaint.strokeWidth = (tabW * 0.04f).coerceAtLeast(1.2f)
+        borderPaint.color = 0x33000000
+        canvas.drawPath(bodyPath, borderPaint)
+
+        // 握柄：居中竖条，颜色即状态
+        val gripW = (tabW * 0.14f).coerceAtLeast(m * 0.2f)
+        val gripH = tabH * (0.32f + 0.14f * gripExtend)
+        gripPaint.color = accent
+        canvas.drawRoundRect(
+            bodyRect.centerX() - gripW / 2f, bodyRect.centerY() - gripH / 2f,
+            bodyRect.centerX() + gripW / 2f, bodyRect.centerY() + gripH / 2f,
+            gripW / 2f, gripW / 2f, gripPaint
+        )
+
+        // 按压：整体压一层淡黑（iOS 按钮手感）
+        if (pressed) {
+            pressPaint.color = 0x14000000
+            canvas.drawPath(bodyPath, pressPaint)
+        }
+    }
+
+    // 圆角：贴右缘时内侧在左（左上/左下大圆角）；贴左缘时镜像
+    private fun cornerRadii(innerR: Float, innerRy: Float, outerR: Float): FloatArray =
+        if (onRight) {
+            floatArrayOf(innerR, innerRy, outerR, outerR, outerR, outerR, innerR, innerRy)
+        } else {
+            floatArrayOf(outerR, outerR, innerR, innerRy, innerR, innerRy, outerR, outerR)
+        }
+
+    // 提供签体轮廓（与 draw 中的 bodyRect 一致：贴边侧无 margin），elevation 投影才能渲染
+    override fun getOutline(outline: Outline) {
+        val w = bounds.width()
+        val h = bounds.height()
+        if (w <= 0 || h <= 0) return
+        val m = marginPx
+        val tabW = w - 2 * m
+        val left = if (onRight) w - tabW else 0
+        outline.setRoundRect(left, m, left + tabW, h - m, tabW * 0.4f)
+    }
+
+    override fun setAlpha(alpha: Int) {}
+
+    @Deprecated("Deprecated in Java")
+    override fun setColorFilter(colorFilter: ColorFilter?) {}
+
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+}
+
+/**
+ * 边签状态：签体始终是磨砂玻璃，居中握柄颜色即状态——待机墨 / 识别红 + 呼吸光晕 / 成功绿 / 失败灰
  */
 enum class BallState { IDLE, SCANNING, SUCCESS, ERROR }
 
@@ -74,22 +235,22 @@ class FloatingOverlayController(
 ) {
     interface Callbacks {
         fun onCaptureClick()
-        fun onSaveClick(title: String, priceCents: Long)
+        fun onSaveClick(title: String, priceCents: Long, ocrTitle: String)
         fun onReCaptureClick()
         fun onPriceChanged(priceCents: Long?)
     }
 
-    // 单击=价格识别；双击/长按=跳转拼多多。由 GestureDetector 统一判定，
-    // 避免 View 自带的 click/longClick 与拖拽触摸监听相互干扰
+    // 单击=价格识别；双击=轮换跳转比价应用（一个都没设则回拼多多）；长按=跳转拼多多。
+    // 由 GestureDetector 统一判定，避免 View 自带的 click/longClick 与拖拽触摸监听相互干扰
     private val gestureListener = object : GestureDetector.SimpleOnGestureListener() {
         // 手动双击判定：系统默认 300ms 窗口在部分 ROM 上偏短，放宽到 500ms。
-        // 单击延迟 500ms 派发识别，期间第二击到达则取消并跳转拼多多
+        // 单击延迟 500ms 派发识别，期间第二击到达则取消并跳转比价应用
         override fun onSingleTapUp(e: MotionEvent): Boolean {
             val now = SystemClock.uptimeMillis()
             if (now - lastTapUpTime < DOUBLE_TAP_TIMEOUT_MS) {
                 resetTapState()
                 cancelAutoCollapse()
-                launchPdd()
+                launchNextCompareApp()
             } else {
                 lastTapUpTime = now
                 pendingSingleTap?.cancel()
@@ -107,7 +268,7 @@ class FloatingOverlayController(
         override fun onDoubleTap(e: MotionEvent): Boolean {
             resetTapState()
             cancelAutoCollapse()
-            launchPdd()
+            launchNextCompareApp()
             return true
         }
 
@@ -138,17 +299,18 @@ class FloatingOverlayController(
     private var panelView: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
 
-    // 悬浮球相关
+    // 边签相关
     private var ballWrap: FrameLayout? = null
-    private var ballText: TextView? = null
-    private var ballRing: View? = null
-    private var ringAnimator: ValueAnimator? = null
-    private var ringFadeAnimator: ValueAnimator? = null
-    private var ringFadeLevel = 0f
-    private var pulseProgress = 0f
+    private var ballFace: View? = null
+    private var ballFaceDrawable: EdgeTabDrawable? = null
+    private var glowPulseAnimator: ValueAnimator? = null
+    private var glowFadeAnimator: ValueAnimator? = null
+    private var glowLevel = 0f
+    private var glowPulse = 0f
+    private var gripExtendAnimator: ValueAnimator? = null
     private var ballColorAnimator: ValueAnimator? = null
-    private var currentBallColor = BrandRed
-    private var glyphAnimator: AnimatorSet? = null
+    private var currentBallColor = InkColor
+    private var panelSlideAnimator: ValueAnimator? = null
 
     // 结果面板相关
     private var resultPanel: LinearLayout? = null
@@ -158,9 +320,15 @@ class FloatingOverlayController(
     private var comparisonDot: View? = null
     private var comparisonTitle: TextView? = null
     private var comparisonHint: TextView? = null
+    private var saveButton: TextView? = null
     private var currentComparison: ProductPriceComparison? = null
+    private var pendingOcrTitle: String = ""
+    // 当前面板是否处于「识别后自动保存」模式：true 时按钮组换成回执形态
+    // （改错了才需要动，改对不用点保存），false 时保持原有「保存」主按钮
+    private var panelAutoSaved: Boolean = false
 
     private var autoCollapseJob: Job? = null
+    private var editingMode = false
 
     val isShowing: Boolean
         get() = overlayView != null
@@ -184,9 +352,33 @@ class FloatingOverlayController(
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
         runCatching {
             context.startActivity(intent)
+            // 回到拼多多 = 本轮比价结束：轮换位置归零，下次双击从第一个比价应用重新开始
+            CompareApps.resetLaunchIndex(context)
         }.onFailure {
             Log.e("PddBall", "launchPdd failed", it)
             Toast.makeText(context, "跳转失败：${it.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 双击：轮换跳转用户选定的比价应用（按勾选顺序循环）。
+    // 「跳转比价时复制标题」开启时，比较意图账本：desiredTitle（最新想要的标题）与
+    // knownClipTitle（剪贴板里实际内容）不一致才经中转页复制——识别后首次双击复制一次，
+    // 之后应用间轮换纯跳转；长按卡片复制过的标题既不会被覆盖也不会重弹
+    private fun launchNextCompareApp() {
+        val pkg = CompareApps.nextPackageName(context) ?: run {
+            launchPdd()
+            return
+        }
+        val label = CompareApps.appLabel(context, pkg)
+        val desired = CompareApps.desiredTitle
+        if (CompareApps.isAutoCopyTitle(context) && !desired.isNullOrBlank() && desired != CompareApps.knownClipTitle) {
+            ClipRelayActivity.start(context, desired, pkg)
+            return
+        }
+        if (CompareApps.launch(context, pkg)) {
+            Toast.makeText(context, "比价 → $label", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "无法打开「$label」", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -205,8 +397,9 @@ class FloatingOverlayController(
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (context.resources.displayMetrics.widthPixels - dp(96)).coerceAtLeast(dp(24))
-            y = dp(220)
+            x = context.resources.displayMetrics.widthPixels - tabViewW()
+            y = dp(160)
+            restoreTabPosition(this)
         }
 
         overlayView = ball
@@ -217,17 +410,21 @@ class FloatingOverlayController(
             return
         }
 
-        // 入场：淡入 + 弹性放大
+        // 入场：从所在边缘"长出来"（贴哪条边就朝屏内滑入）
+        val slideFrom = if (currentTabOnRight()) {
+            dp(TAB_MARGIN_DP + TAB_W_DP).toFloat()
+        } else {
+            -dp(TAB_MARGIN_DP + TAB_W_DP).toFloat()
+        }
         ball.alpha = 0f
-        ball.scaleX = 0.6f
-        ball.scaleY = 0.6f
+        ball.translationX = slideFrom
         ball.animate()
             .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setDuration(340L)
-            .setInterpolator(OvershootInterpolator(1.1f))
+            .translationX(0f)
+            .setDuration(360L)
+            .setInterpolator(DecelerateInterpolator())
             .start()
+        updateTabSide()
 
         // 面板结构预先创建；其窗口独立于球窗口，展示时才挂载
         resultPanel = createResultPanel()
@@ -254,28 +451,14 @@ class FloatingOverlayController(
         }
         ballWrap = ball
 
-        // 光圈
-        ballRing = View(context).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.TRANSPARENT)
-                setStroke(dp(2), BrandRed)
-            }
-            alpha = 0f
-        }
-        ball.addView(ballRing, FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER))
-
-        // 球面文字
-        ballText = TextView(context).apply {
-            text = "love"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            typeface = ResourcesCompat.getFont(context, R.font.source_serif_4_italic)
-            background = circleBackground(BrandRed)
+        // 边签：签体在 view 内居中、四周留 margin 供光晕扩散
+        val face = EdgeTabDrawable(currentBallColor, dp(TAB_MARGIN_DP))
+        ballFaceDrawable = face
+        ballFace = View(context).apply {
+            background = face
             elevation = dp(6).toFloat()
         }
-        ball.addView(ballText, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
+        ball.addView(ballFace, FrameLayout.LayoutParams(tabViewW(), tabViewH(), Gravity.CENTER))
 
         attachDrag(ball, withGestures = true)
         return ball
@@ -289,9 +472,9 @@ class FloatingOverlayController(
             background = roundedBackground(CardWhite)
             elevation = dp(12).toFloat()
             layoutParams = LinearLayout.LayoutParams(
-                dp(300),
+                dp(PANEL_W_DP),
                 WindowManager.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(10) }
+            )
             setOnTouchListener { _, _ ->
                 scheduleAutoCollapse()
                 false
@@ -348,6 +531,15 @@ class FloatingOverlayController(
                     showKeyboard(view)
                 }
             }
+            // 面板编辑即登记最新剪贴板意图：双击跳转时以这里最后编辑的标题为准
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: Editable?) {
+                    val text = s?.toString()?.trim()
+                    if (!text.isNullOrEmpty()) CompareApps.recordDesiredTitle(text)
+                }
+            })
         }
         val titleDivider = View(context).apply {
             setBackgroundColor(HairlineBorder)
@@ -446,7 +638,7 @@ class FloatingOverlayController(
         priceRow.addView(decimalGroup)
 
         val priceHint = TextView(context).apply {
-            text = "点数字可修改 · 识别不准可用 /10 x10 修正"
+            text = "识别有误？标题可直接点改 · 价格错位用 /10 x10"
             textSize = 11f
             setTextColor(TextSecondary)
             layoutParams = LinearLayout.LayoutParams(
@@ -485,7 +677,10 @@ class FloatingOverlayController(
         comparisonStrip?.addView(comparisonTitle)
         comparisonStrip?.addView(comparisonHint)
 
-        // 按钮行
+        // 按钮行——两种形态：
+        // 常规：红底「保存」+ 描边「重新识别」
+        // 回执（自动保存开启）：数据已入库，主按钮变「修改保存」，
+        //   对了什么都不用点，改错了才需要动作
         val buttons = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -493,7 +688,7 @@ class FloatingOverlayController(
                 WindowManager.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(12) }
         }
-        buttons.addView(TextView(context).apply {
+        saveButton = TextView(context).apply {
             text = "保存"
             gravity = Gravity.CENTER
             textSize = 15f
@@ -503,7 +698,8 @@ class FloatingOverlayController(
             setPadding(0, dp(11), 0, dp(11))
             layoutParams = LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { handleSave() }
-        })
+        }
+        buttons.addView(saveButton)
         buttons.addView(TextView(context).apply {
             text = "重新识别"
             gravity = Gravity.CENTER
@@ -541,7 +737,7 @@ class FloatingOverlayController(
             scope.launch { updateState(BallState.ERROR, showPanel = true) }
             return
         }
-        callbacks.onSaveClick(title, priceCents)
+        callbacks.onSaveClick(title, priceCents, pendingOcrTitle)
     }
 
     // ---- 拖拽相关 ----
@@ -563,6 +759,7 @@ class FloatingOverlayController(
                     startX = params.x
                     startY = params.y
                     moved = false
+                    if (withGestures) animateBallPressed(true)
                     withGestures
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -575,89 +772,157 @@ class FloatingOverlayController(
                     withGestures
                 }
                 MotionEvent.ACTION_UP -> {
+                    if (withGestures) animateBallPressed(false)
                     if (moved) {
                         snapOverlayToNearestEdge()
                     }
                     withGestures || moved
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (withGestures) animateBallPressed(false)
+                    withGestures
                 }
                 else -> withGestures
             }
         }
     }
 
-    // 只移动球窗口；若面板窗口已挂载则同步跟随
+    // 只移动球窗口；若面板窗口已挂载则同步跟随。备用球周期内不挂载，无需跟移——
+    // 挂载时从 overlayParams 同步位置
     private fun moveOverlayTo(x: Int, y: Int) {
         val params = overlayParams ?: return
         params.x = clampOverlayX(x)
         params.y = clampOverlayY(y)
         runCatching { windowManager?.updateViewLayout(overlayView, params) }
+        updateTabSide()
         syncPanelPosition()
     }
 
     private fun syncPanelPosition() {
         val pv = panelView ?: return
         val pp = panelParams ?: return
+        panelSlideAnimator?.cancel()
+        panelSlideAnimator = null
         if (!pv.isAttachedToWindow) return
         computePanelPosition()
         runCatching { windowManager?.updateViewLayout(pv, pp) }
     }
 
-    // 面板窗口位置：显示在球正下方；球在右半屏时面板左移，使面板右缘对齐球右缘（面板朝屏幕内侧展开）
+    private fun currentTabOnRight(): Boolean {
+        val params = overlayParams ?: return true
+        val screenW = context.resources.displayMetrics.widthPixels
+        val w = overlayView?.width?.takeIf { it > 0 } ?: tabViewW()
+        return params.x + w / 2 >= screenW / 2
+    }
+
+    private fun updateTabSide() {
+        ballFaceDrawable?.setOnRight(currentTabOnRight())
+    }
+
+    // 面板窗口位置：识别卡片贴着边签朝屏幕内侧展开，垂直方向与签中心对齐（像挂在签上的活页）
     private fun computePanelPosition() {
-        val ballP = overlayParams ?: return
+        val tabP = overlayParams ?: return
         val panelP = panelParams ?: return
-        val screenWidth = context.resources.displayMetrics.widthPixels
-        val ballW = dp(72)
-        val panelW = dp(300)
-        val ballCenterX = ballP.x + ballW / 2
-        panelP.x = if (ballCenterX >= screenWidth / 2) {
-            ballP.x + ballW - panelW
+        val screenW = context.resources.displayMetrics.widthPixels
+        val screenH = context.resources.displayMetrics.heightPixels
+        val viewW = overlayView?.width?.takeIf { it > 0 } ?: tabViewW()
+        val tabH = overlayView?.height?.takeIf { it > 0 } ?: tabViewH()
+        val bodyW = dp(TAB_W_DP)
+        val panelW = dp(PANEL_W_DP)
+        val panelH = panelHeightEstimate()
+        val gap = dp(3)
+
+        // 以签体边缘（而非 view 边缘）为基准：view 贴边侧内还有空白，不能算进间距
+        panelP.x = if (currentTabOnRight()) {
+            tabP.x + viewW - bodyW - gap - panelW
         } else {
-            ballP.x
+            tabP.x + bodyW + gap
         }
-        panelP.x = panelP.x.coerceIn(0, (screenWidth - panelW).coerceAtLeast(0))
-        panelP.y = ballP.y + ballW
+        panelP.x = panelP.x.coerceIn(0, (screenW - panelW).coerceAtLeast(0))
+
+        val tabCenterY = tabP.y + tabH / 2
+        panelP.y = (tabCenterY - panelH / 2)
+            .coerceIn(dp(12), (screenH - panelH - dp(12)).coerceAtLeast(dp(12)))
+    }
+
+    // 面板高度：优先取已布局的真实高度；首次展示前用 measure 兜底
+    private fun panelHeightEstimate(): Int {
+        val panel = resultPanel ?: return dp(300)
+        if (panel.height > 0) return panel.height
+        return runCatching {
+            panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+            panel.measuredHeight
+        }.getOrNull()?.takeIf { it > 0 } ?: dp(300)
     }
 
     private fun clampOverlayX(x: Int): Int {
-        val edgeInset = dp(24)
-        val overlayWidth = overlayView?.width?.takeIf { it > 0 } ?: dp(96)
-        val maxX = (context.resources.displayMetrics.widthPixels - overlayWidth - edgeInset)
-            .coerceAtLeast(edgeInset)
-        return x.coerceIn(edgeInset, maxX)
+        val overlayWidth = overlayView?.width?.takeIf { it > 0 } ?: tabViewW()
+        val maxX = (context.resources.displayMetrics.widthPixels - overlayWidth)
+            .coerceAtLeast(0)
+        return x.coerceIn(0, maxX)
     }
 
     private fun clampOverlayY(y: Int): Int {
         val topInset = dp(24)
         val bottomInset = dp(24)
-        val overlayHeight = overlayView?.height?.takeIf { it > 0 } ?: dp(96)
+        val overlayHeight = overlayView?.height?.takeIf { it > 0 } ?: tabViewH()
         val maxY = (context.resources.displayMetrics.heightPixels - overlayHeight - bottomInset)
             .coerceAtLeast(topInset)
         return y.coerceIn(topInset, maxY)
     }
 
+    // 边签松手后平贴到最近的屏幕边缘（左边签 / 右边签），沿边缘上下滑动
     private fun snapOverlayToNearestEdge() {
         val params = overlayParams ?: return
         overlayView?.post {
-            val width = context.resources.displayMetrics.widthPixels
-            val overlayWidth = overlayView?.width?.takeIf { it > 0 } ?: dp(72)
-            val edgeInset = dp(24)
-            val leftX = edgeInset
-            val rightX = (width - overlayWidth - edgeInset).coerceAtLeast(edgeInset)
+            val screenW = context.resources.displayMetrics.widthPixels
+            val overlayWidth = overlayView?.width?.takeIf { it > 0 } ?: tabViewW()
             val centerX = params.x + overlayWidth / 2
-            params.x = if (centerX < width / 2) leftX else rightX
+            params.x = if (centerX < screenW / 2) 0 else screenW - overlayWidth
             params.y = clampOverlayY(params.y)
             runCatching { windowManager?.updateViewLayout(overlayView, params) }
+            updateTabSide()
             syncPanelPosition()
+            persistTabPosition()
         }
+    }
+
+    // ---- 位置记忆：拖到哪里，下次启动就停在哪里 ----
+    // 拼多多商品页的悬浮视频窗固定从右缘弹出（延迟约 0.5s），若边签停在同一位置会被盖住、
+    // 后续点击还会误触视频。错开位置一次即可永久避开——把选择权交给用户比追着视频窗
+    // 挪动（已被证实的闪烁深渊）可靠得多
+
+    private fun positionPrefs() =
+        context.getSharedPreferences("overlay_position", Context.MODE_PRIVATE)
+
+    private fun persistTabPosition() {
+        val params = overlayParams ?: return
+        val onRight = currentTabOnRight()
+        positionPrefs().edit()
+            .putBoolean("onRight", onRight)
+            .putInt("y", params.y)
+            .apply()
+    }
+
+    private fun restoreTabPosition(params: WindowManager.LayoutParams): WindowManager.LayoutParams {
+        val prefs = positionPrefs()
+        if (!prefs.contains("onRight")) return params
+        val screenW = context.resources.displayMetrics.widthPixels
+        val viewW = tabViewW()
+        params.x = if (prefs.getBoolean("onRight", true)) screenW - viewW else 0
+        params.y = clampOverlayY(prefs.getInt("y", dp(160)))
+        return params
     }
 
     // ---- 自动折叠 ----
 
     private fun scheduleAutoCollapse() {
         cancelAutoCollapse()
+        // 时长由设置决定（默认 8 秒）；选「常驻」则不启动折叠，靠 × / 重新识别 / 下次识别收起
+        val durationMs = CapturePrefs.getReceiptDurationMs(context)
+        if (durationMs <= 0L) return
         autoCollapseJob = scope.launch {
-            delay(AUTO_COLLAPSE_MS)
+            delay(durationMs)
             updateState(BallState.IDLE, showPanel = false)
         }
     }
@@ -688,8 +953,19 @@ class FloatingOverlayController(
     suspend fun showEditableResult(
         title: String,
         priceCents: Long,
-        comparison: ProductPriceComparison?
+        comparison: ProductPriceComparison?,
+        autoSaved: Boolean = false
     ) {
+        // 本次识别的原始标题（未经编辑）：保存时随面板值一起上抛，
+        // 两者差异即用户本次的编辑幅度，仓库侧据此决定沿用商品已有标题还是采用本次值
+        pendingOcrTitle = title
+        panelAutoSaved = autoSaved
+        // 只登记意图，不在识别完成时写剪贴板——服务进程在后台写会触发
+        // MIUI/HyperOS 的系统剪贴板悬浮窗，贴着屏幕边缘把悬浮球盖掉；
+        // 复制推迟到双击跳转时经前台中转页（ClipRelayActivity）完成。
+        // 意图账本存 CompareApps（进程内共享）：双击只认账本不读面板 EditText，
+        // 否则「识别A后长按复制B再双击」会被面板里残留的旧A覆盖掉新B
+        CompareApps.recordDesiredTitle(title)
         withContext(Dispatchers.Main) {
             setOverlayEditingMode(true)
             setBallState(BallState.SUCCESS)
@@ -697,9 +973,29 @@ class FloatingOverlayController(
             titleEdit?.setText(title)
             priceEdit?.setText(formatPlainPrice(priceCents))
             updateComparisonText(priceCents)
+            applyReceiptMode(autoSaved)
             showPanelAnimated()
         }
         scheduleAutoCollapse()
+    }
+
+    /**
+     * 回执模式切换：识别后自动保存开启时，数据已在库里——主按钮从「保存」换成
+     * 「修改保存」（浅灰底，弱化视觉权重：确认过的动作不需要大红色吸引）；
+     * 关闭时恢复红底「保存」。服务侧的修改保存会先撤回自动保存行再按面板值重记，
+     * 重新识别同样撤回，识别错值不会留在账里
+     */
+    private fun applyReceiptMode(autoSaved: Boolean) {
+        val btn = saveButton ?: return
+        if (autoSaved) {
+            btn.text = "修改保存"
+            btn.setTextColor(TextPrimary)
+            btn.background = roundedBackground(Color.parseColor("#F2F3F5"), radiusDp = 10, withStroke = true)
+        } else {
+            btn.text = "保存"
+            btn.setTextColor(Color.WHITE)
+            btn.background = roundedBackground(BrandRed, radiusDp = 10, withStroke = false)
+        }
     }
 
     // ---- 对比条 ----
@@ -766,28 +1062,32 @@ class FloatingOverlayController(
         comparisonDot?.background = circleBackground(dotColor)
     }
 
-    // ---- 面板动画 ----
+    // ---- 面板动画：卡片沿边签方向从屏幕边缘抽出 / 收回，签与卡始终连为一体 ----
 
     private fun showPanelAnimated() {
         val panel = resultPanel ?: return
         val pv = panelView ?: return
         val pp = panelParams ?: return
 
-        // 先取消进行中的隐藏动画，避免其 withEndAction 在展示后把面板又收掉
+        // 先取消进行中的收回动画，避免其 onAnimationEnd 在展示后把面板又收掉
         panel.animate().cancel()
+        panelSlideAnimator?.cancel()
 
         if (panel.visibility == View.VISIBLE && pv.isAttachedToWindow) {
-            // 已在展示中：确保视觉状态复位并跟随球的位置
+            // 已在展示中：复位视觉状态并跟随签的位置
             panel.alpha = 1f
-            panel.translationY = 0f
-            panel.scaleX = 1f
-            panel.scaleY = 1f
+            animateGripExtend(1f)
             syncPanelPosition()
             return
         }
 
-        // 挂载/更新面板窗口——球窗口完全不动
         computePanelPosition()
+        val targetX = pp.x
+        val onRight = currentTabOnRight()
+        val slide = dp(72)
+
+        // 签窗口完全不动；卡片先挂载在签后方（向边缘一侧偏移），再向屏内滑出
+        pp.x = targetX + if (onRight) slide else -slide
         if (!pv.isAttachedToWindow) {
             runCatching { windowManager?.addView(pv, pp) }
         } else {
@@ -795,163 +1095,60 @@ class FloatingOverlayController(
         }
 
         panel.alpha = 0f
-        panel.translationY = dp(10).toFloat()
-        panel.scaleX = 0.97f
-        panel.scaleY = 0.97f
         panel.visibility = View.VISIBLE
-        panel.animate()
-            .alpha(1f)
-            .translationY(0f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setDuration(260L)
-            .setInterpolator(DecelerateInterpolator())
-            .start()
+        animateGripExtend(1f)
+
+        panelSlideAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 320L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                val t = animator.animatedValue as Float
+                pp.x = (targetX + (1f - t) * (if (onRight) slide else -slide)).toInt()
+                runCatching { windowManager?.updateViewLayout(pv, pp) }
+                panel.alpha = (t * 1.8f).coerceAtMost(1f)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator, isReverse: Boolean) {
+                    pp.x = targetX
+                    runCatching { windowManager?.updateViewLayout(pv, pp) }
+                    panel.alpha = 1f
+                }
+            })
+            start()
+        }
     }
 
     private fun hidePanelAnimated() {
         val panel = resultPanel ?: return
         if (panel.visibility != View.VISIBLE) return
-        val pv = panelView
+        val pv = panelView ?: return
+        val pp = panelParams ?: return
 
         panel.animate().cancel()
-        panel.animate()
-            .alpha(0f)
-            .translationY(dp(6).toFloat())
-            .scaleX(0.98f)
-            .scaleY(0.98f)
-            .setDuration(170L)
-            .setInterpolator(AccelerateInterpolator())
-            .withEndAction {
-                panel.visibility = View.GONE
-                panel.alpha = 1f
-                panel.translationY = 0f
-                panel.scaleX = 1f
-                panel.scaleY = 1f
-                if (pv != null && pv.isAttachedToWindow) {
-                    runCatching { windowManager?.removeView(pv) }
-                }
-            }
-            .start()
-    }
+        panelSlideAnimator?.cancel()
 
-    // ---- 悬浮球状态 ----
+        val onRight = currentTabOnRight()
+        val slide = dp(72)
+        val startX = pp.x
+        val startAlpha = panel.alpha
+        animateGripExtend(0f)
 
-    private fun setBallState(state: BallState) {
-        val label = ballText ?: return
-        when (state) {
-            BallState.IDLE -> {
-                stopRingPulse()
-                swapBallGlyph("love")
-                animateBallColor(BrandRed)
-            }
-            BallState.SCANNING -> {
-                swapBallGlyph("love")
-                animateBallColor(BrandRed)
-                startRingPulse()
-            }
-            BallState.SUCCESS -> {
-                stopRingPulse()
-                swapBallGlyph("✓")
-                animateBallColor(FreshGreen)
-            }
-            BallState.ERROR -> {
-                stopRingPulse()
-                swapBallGlyph("!")
-                animateBallColor(TextSecondary)
-            }
-        }
-    }
-
-    private fun animateBallColor(target: Int) {
-        val label = ballText ?: return
-        if (currentBallColor == target) return
-        ballColorAnimator?.cancel()
-        ballColorAnimator = ValueAnimator.ofObject(ArgbEvaluator(), currentBallColor, target).apply {
-            duration = 320L
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { animator ->
-                currentBallColor = animator.animatedValue as Int
-                (label.background as? GradientDrawable)?.setColor(currentBallColor)
-            }
-            start()
-        }
-    }
-
-    private fun swapBallGlyph(newText: String) {
-        val label = ballText ?: return
-        if (label.text.toString() == newText) return
-        glyphAnimator?.cancel()
-        val shrink = ValueAnimator.ofFloat(label.scaleX, 0.6f).apply {
-            duration = 110L
+        // 收回：卡片沿原路滑回签后方并淡出
+        panelSlideAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 220L
             interpolator = AccelerateInterpolator()
             addUpdateListener { animator ->
-                val scale = animator.animatedValue as Float
-                label.scaleX = scale
-                label.scaleY = scale
-            }
-        }
-        val expand = ValueAnimator.ofFloat(0.6f, 1f).apply {
-            duration = 260L
-            interpolator = OvershootInterpolator(1.5f)
-            addUpdateListener { animator ->
-                val scale = animator.animatedValue as Float
-                label.scaleX = scale
-                label.scaleY = scale
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationStart(animation: Animator) {
-                    label.text = newText
-                }
-            })
-        }
-        AnimatorSet().apply {
-            playSequentially(shrink, expand)
-            glyphAnimator = this
-            start()
-        }
-    }
-
-    private fun startRingPulse() {
-        val ring = ballRing ?: return
-        ringAnimator?.cancel()
-        ringFadeAnimator?.cancel()
-        ringAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 650L
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-            addUpdateListener { animator ->
-                pulseProgress = animator.animatedValue as Float
-                applyRingVisual(ring)
-            }
-            start()
-        }
-        ringFadeAnimator = ValueAnimator.ofFloat(ringFadeLevel, 1f).apply {
-            duration = 240L
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { animator ->
-                ringFadeLevel = animator.animatedValue as Float
-                applyRingVisual(ring)
-            }
-            start()
-        }
-    }
-
-    private fun stopRingPulse() {
-        val ring = ballRing ?: return
-        ringFadeAnimator?.cancel()
-        ringFadeAnimator = ValueAnimator.ofFloat(ringFadeLevel, 0f).apply {
-            duration = 240L
-            addUpdateListener { animator ->
-                ringFadeLevel = animator.animatedValue as Float
-                applyRingVisual(ring)
+                val t = animator.animatedValue as Float
+                pp.x = (startX + t * (if (onRight) slide else -slide)).toInt()
+                runCatching { windowManager?.updateViewLayout(pv, pp) }
+                panel.alpha = startAlpha * (1f - t)
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator, isReverse: Boolean) {
-                    if (ringFadeLevel <= 0.01f) {
-                        ringAnimator?.cancel()
-                        ringAnimator = null
-                        ring.alpha = 0f
+                    panel.visibility = View.GONE
+                    panel.alpha = 1f
+                    if (pv.isAttachedToWindow) {
+                        runCatching { windowManager?.removeView(pv) }
                     }
                 }
             })
@@ -959,16 +1156,132 @@ class FloatingOverlayController(
         }
     }
 
-    private fun applyRingVisual(ring: View) {
-        val scale = 0.78f + pulseProgress * 0.4f
-        ring.scaleX = scale
-        ring.scaleY = scale
-        ring.alpha = ringFadeLevel * (1f - pulseProgress) * 0.65f
+    // ---- 边签状态 ----
+
+    private fun setBallState(state: BallState) {
+        when (state) {
+            BallState.IDLE -> {
+                stopGlowPulse()
+                animateBallColor(InkColor)
+            }
+            BallState.SCANNING -> {
+                animateBallColor(BrandRed)
+                startGlowPulse()
+            }
+            BallState.SUCCESS -> {
+                stopGlowPulse()
+                animateBallColor(FreshGreen)
+            }
+            BallState.ERROR -> {
+                stopGlowPulse()
+                animateBallColor(TextSecondary)
+            }
+        }
+    }
+
+    private fun animateBallColor(target: Int) {
+        val drawable = ballFaceDrawable ?: return
+        if (currentBallColor == target) return
+        ballColorAnimator?.cancel()
+        ballColorAnimator = ValueAnimator.ofObject(ArgbEvaluator(), currentBallColor, target).apply {
+            duration = 320L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                currentBallColor = animator.animatedValue as Int
+                drawable.setAccentColor(currentBallColor)
+            }
+            start()
+        }
+    }
+
+    // 按压手感：按下缩到 0.94 + 高光点下移（光被压低），松手弹性回弹
+    private fun animateBallPressed(isPressed: Boolean) {
+        val wrap = ballWrap ?: return
+        ballFaceDrawable?.setPressed(isPressed)
+        wrap.animate().cancel()
+        if (isPressed) {
+            wrap.animate()
+                .scaleX(0.94f).scaleY(0.94f)
+                .setDuration(110L)
+                .setInterpolator(AccelerateInterpolator())
+                .start()
+        } else {
+            wrap.animate()
+                .scaleX(1f).scaleY(1f)
+                .setDuration(260L)
+                .setInterpolator(OvershootInterpolator(1.4f))
+                .start()
+        }
+    }
+
+    // 识别呼吸光晕：沿签体轮廓扩散的红环，直接画在签的 drawable 里
+    private fun startGlowPulse() {
+        val drawable = ballFaceDrawable ?: return
+        glowPulseAnimator?.cancel()
+        glowFadeAnimator?.cancel()
+        glowPulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 700L
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            addUpdateListener { animator ->
+                glowPulse = animator.animatedValue as Float
+                drawable.setGlow(glowPulse, glowLevel)
+            }
+            start()
+        }
+        glowFadeAnimator = ValueAnimator.ofFloat(glowLevel, 1f).apply {
+            duration = 240L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                glowLevel = animator.animatedValue as Float
+                drawable.setGlow(glowPulse, glowLevel)
+            }
+            start()
+        }
+    }
+
+    private fun stopGlowPulse() {
+        val drawable = ballFaceDrawable ?: return
+        glowPulseAnimator?.cancel()
+        glowFadeAnimator?.cancel()
+        glowFadeAnimator = ValueAnimator.ofFloat(glowLevel, 0f).apply {
+            duration = 240L
+            addUpdateListener { animator ->
+                glowLevel = animator.animatedValue as Float
+                drawable.setGlow(glowPulse, glowLevel)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator, isReverse: Boolean) {
+                    if (glowLevel <= 0.01f) {
+                        glowPulseAnimator?.cancel()
+                        glowPulseAnimator = null
+                    }
+                }
+            })
+            start()
+        }
+    }
+
+    // 握柄伸缩：卡片挂上时签的握柄拉长，表示"签连着卡"
+    private fun animateGripExtend(target: Float) {
+        val drawable = ballFaceDrawable ?: return
+        gripExtendAnimator?.cancel()
+        val start = drawable.gripExtend
+        if (kotlin.math.abs(start - target) < 0.01f) return
+        gripExtendAnimator = ValueAnimator.ofFloat(start, target).apply {
+            duration = 220L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                drawable.gripExtend = animator.animatedValue as Float
+            }
+            start()
+        }
     }
 
     // ---- 编辑模式 ----
 
     private fun setOverlayEditingMode(enabled: Boolean) {
+        editingMode = enabled
         val params = panelParams ?: return
         val view = panelView ?: return
         val notFocusable = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -1044,6 +1357,10 @@ class FloatingOverlayController(
     private fun dp(value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
 
+    // 边签 view 尺寸 = 签体 + 四周光晕 margin
+    private fun tabViewW(): Int = dp(TAB_W_DP + TAB_MARGIN_DP * 2)
+    private fun tabViewH(): Int = dp(TAB_H_DP + TAB_MARGIN_DP * 2)
+
     private fun circleBackground(color: Int): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -1065,10 +1382,11 @@ class FloatingOverlayController(
 
     fun destroy() {
         cancelAutoCollapse()
-        ringAnimator?.cancel()
-        ringFadeAnimator?.cancel()
+        glowPulseAnimator?.cancel()
+        glowFadeAnimator?.cancel()
+        gripExtendAnimator?.cancel()
+        panelSlideAnimator?.cancel()
         ballColorAnimator?.cancel()
-        glyphAnimator?.cancel()
         ballWrap?.animate()?.cancel()
         resultPanel?.animate()?.cancel()
         overlayView?.let { view ->
@@ -1083,7 +1401,10 @@ class FloatingOverlayController(
     }
 
     companion object {
-        private const val AUTO_COLLAPSE_MS = 8_000L
         private const val BALL_RESTORE_MS = 1_500L
+        private const val TAB_W_DP = 27
+        private const val TAB_H_DP = 76
+        private const val TAB_MARGIN_DP = 6
+        private const val PANEL_W_DP = 300
     }
 }

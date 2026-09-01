@@ -62,12 +62,14 @@ object SyncProtocol {
                         .put("recordedAt", record.recordedAt)
                         .put("deviceId", record.deviceId)
                         .put("deviceName", record.deviceName)
+                        .put("autoSaved", record.autoSaved)
                 )
             }
             array.put(
                 JSONObject()
                     .put("title", product.title)
                     .put("normalizedTitle", product.normalizedTitle)
+                    .put("ocrTitle", product.ocrTitle)
                     .put("firstSeenAt", product.firstSeenAt)
                     .put("history", history)
             )
@@ -122,7 +124,8 @@ object SyncProtocol {
                         priceCents = record.optLong("priceCents"),
                         recordedAt = record.optLong("recordedAt"),
                         deviceId = record.optString("deviceId", "peer"),
-                        deviceName = record.optString("deviceName", "对方设备")
+                        deviceName = record.optString("deviceName", "对方设备"),
+                        autoSaved = record.optBoolean("autoSaved", false)
                     )
                 )
             }
@@ -131,7 +134,8 @@ object SyncProtocol {
                     title = product.optString("title"),
                     normalizedTitle = product.optString("normalizedTitle"),
                     firstSeenAt = product.optLong("firstSeenAt", System.currentTimeMillis()),
-                    history = history
+                    history = history,
+                    ocrTitle = product.optString("ocrTitle")
                 )
             )
         }

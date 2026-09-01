@@ -17,14 +17,19 @@ data class PeerHistoryRecord(
     val priceCents: Long,
     val recordedAt: Long,
     val deviceId: String,
-    val deviceName: String
+    val deviceName: String,
+    // 该条是否「识别后自动保存」（未经面板确认）：对端明细里据此显示 auto 标记；
+    // 旧版本对端不传此字段时按 false 处理
+    val autoSaved: Boolean = false
 )
 
 data class PeerProductData(
     val title: String,
     val normalizedTitle: String,
     val firstSeenAt: Long,
-    val history: List<PeerHistoryRecord>
+    val history: List<PeerHistoryRecord>,
+    // 旧版本对端发来的数据无此字段 → 空串，合并侧回填 title
+    val ocrTitle: String = ""
 )
 
 // 同步交换的删除墓碑
@@ -38,6 +43,7 @@ data class PeerTombstone(
 
 class ProductRepository(
     private val dao: ProductPriceDao,
+    private val screenshotStore: ScreenshotStore,
     private val matcher: TitleMatcher = TitleMatcher(),
     private val deviceId: String = "local",
     // 动态读取：同步弹窗里改名后，新保存的记录立即用新名字
@@ -55,14 +61,16 @@ class ProductRepository(
     suspend fun clearAll() {
         dao.deleteAllHistory()
         dao.deleteAll()
-        // 本地清空视为重置，墓碑一并清除（不影响对端已有数据）
         dao.deleteAllTombstones()
+        screenshotStore.deleteAll()
     }
 
     suspend fun deleteProduct(productId: Long) {
         val product = dao.getProductById(productId)
+        val historyIds = dao.getHistoryIdsForProduct(productId)
         dao.deleteHistoryForProduct(productId)
         dao.deleteProductById(productId)
+        if (historyIds.isNotEmpty()) screenshotStore.deleteFor(historyIds)
         if (product != null) {
             dao.insertTombstone(
                 SyncTombstone(
@@ -79,6 +87,7 @@ class ProductRepository(
         val entry = dao.getHistoryById(historyId) ?: return
         val product = dao.getProductById(entry.productId)
         dao.deleteHistoryById(historyId)
+        screenshotStore.deleteFor(listOf(historyId))
         val lowest = dao.getLowestHistoryPrice(entry.productId)
         if (lowest == null) {
             // 历史清空后商品已无意义，连同删除，避免留下无记录的空壳商品
@@ -114,7 +123,11 @@ class ProductRepository(
     }
 
     suspend fun findPriceComparison(product: DetectedProduct): ProductPriceComparison? {
-        val matched = matcher.findBestMatch(product.normalizedTitle, dao.getAllOnce()) ?: return null
+        val matched = matcher.findBestMatch(
+            product.normalizedTitle,
+            product.ocrTitle.ifBlank { product.normalizedTitle },
+            dao.getAllOnce()
+        ) ?: return null
         return ProductPriceComparison(
             matchedTitle = matched.title,
             previousPriceCents = matched.priceCents,
@@ -130,25 +143,30 @@ class ProductRepository(
         var changedCount = 0
 
         products.forEach { detected ->
-            val matched = matcher.findBestMatch(detected.normalizedTitle, existing)
+            val ocrTitle = detected.ocrTitle.ifBlank { detected.title }
+            val matched = matcher.findBestMatch(detected.normalizedTitle, ocrTitle, existing)
             if (matched == null) {
                 val inserted = ProductPrice(
                     title = detected.title,
                     normalizedTitle = detected.normalizedTitle,
                     priceCents = detected.priceCents,
                     firstSeenAt = now,
-                    updatedAt = now
+                    updatedAt = now,
+                    ocrTitle = ocrTitle
                 )
                 val productId = dao.insert(inserted)
                 dao.insertHistory(detected.toHistory(productId, now))
                 existing = dao.getAllOnce()
                 changedCount++
             } else if (detected.priceCents < matched.priceCents) {
+                // 低价更新不覆盖标题——商品若被用户编辑过（title != ocrTitle）保持现状
+                val userEditedBefore = matched.ocrTitle.isNotBlank() && matched.title != matched.ocrTitle
                 val updated = matched.copy(
-                    title = detected.title,
-                    normalizedTitle = detected.normalizedTitle,
+                    title = if (userEditedBefore) matched.title else detected.title,
+                    normalizedTitle = if (userEditedBefore) matched.normalizedTitle else detected.normalizedTitle,
                     priceCents = detected.priceCents,
-                    updatedAt = now
+                    updatedAt = now,
+                    ocrTitle = ocrTitle
                 )
                 dao.update(updated)
                 dao.insertHistory(detected.toHistory(matched.id, now))
@@ -161,35 +179,47 @@ class ProductRepository(
         return changedCount
     }
 
-    suspend fun saveManualProduct(product: DetectedProduct): Int {
+    // 返回新插入的历史条目 id（>0）：识别流程拿它把暂存截图归档为该条记录的存档图。
+    // autoSaved=true 时该条历史打上自动保存标（识别后未经用户面板确认）
+    suspend fun saveManualProduct(product: DetectedProduct, autoSaved: Boolean = false): Long {
         val existing = dao.getAllOnce()
         val now = System.currentTimeMillis()
-        val matched = matcher.findBestMatch(product.normalizedTitle, existing)
+        val ocrTitle = product.ocrTitle.ifBlank { product.title }
+        val matched = matcher.findBestMatch(product.normalizedTitle, ocrTitle, existing)
 
-        if (matched == null) {
+        val historyId = if (matched == null) {
             val productId = dao.insert(
                 ProductPrice(
                     title = product.title,
                     normalizedTitle = product.normalizedTitle,
                     priceCents = product.priceCents,
                     firstSeenAt = now,
-                    updatedAt = now
+                    updatedAt = now,
+                    ocrTitle = ocrTitle
                 )
             )
-            dao.insertHistory(product.toHistory(productId, now))
+            dao.insertHistory(product.toHistory(productId, now, autoSaved))
         } else {
+            // 标题覆盖规则——保护用户编辑：
+            // - 本次面板值 != 本次 OCR 原文 → 用户本次编辑了，尊重本次值
+            // - 本次面板值 == OCR 原文（没编辑）但商品此前被编辑过（title != ocrTitle）
+            //   → 保留商品现有标题，仅刷新 OCR 签名与价格，不让 OCR 原文盖回用户改的名字
+            val userEditedNow = product.title != ocrTitle
+            val userEditedBefore = matched.ocrTitle.isNotBlank() && matched.title != matched.ocrTitle
+            val keepExistingTitle = !userEditedNow && userEditedBefore
             dao.update(
                 matched.copy(
-                    title = product.title,
-                    normalizedTitle = product.normalizedTitle,
+                    title = if (keepExistingTitle) matched.title else product.title,
+                    normalizedTitle = if (keepExistingTitle) matched.normalizedTitle else product.normalizedTitle,
                     priceCents = product.priceCents,
-                    updatedAt = now
+                    updatedAt = now,
+                    ocrTitle = ocrTitle
                 )
             )
-            dao.insertHistory(product.toHistory(matched.id, now))
+            dao.insertHistory(product.toHistory(matched.id, now, autoSaved))
         }
         _localChanges.tryEmit(Unit)
-        return 1
+        return historyId
     }
 
     // ---------- P2P 同步：导出 / 合并 ----------
@@ -201,6 +231,7 @@ class ProductRepository(
             PeerProductData(
                 title = product.title,
                 normalizedTitle = product.normalizedTitle,
+                ocrTitle = product.ocrTitle,
                 firstSeenAt = product.firstSeenAt,
                 history = (history[product.id] ?: emptyList()).map {
                     // 归一化：本机旧版本数据（"local"）导出时改写成真实设备 ID，
@@ -210,7 +241,8 @@ class ProductRepository(
                         priceCents = it.priceCents,
                         recordedAt = it.recordedAt,
                         deviceId = if (isLegacyLocal) deviceId else it.deviceId,
-                        deviceName = if (isLegacyLocal) deviceName else it.deviceName
+                        deviceName = if (isLegacyLocal) deviceName else it.deviceName,
+                        autoSaved = it.autoSaved
                     )
                 }
             )
@@ -265,7 +297,11 @@ class ProductRepository(
             val killedBy = productTombstones.firstOrNull { it.keyTitle == peer.normalizedTitle }
             if (killedBy != null && newestRecordedAt <= killedBy.deletedAt) return@forEach
 
-            var matched = matcher.findBestMatch(peer.normalizedTitle, existing)
+            var matched = matcher.findBestMatch(
+                peer.normalizedTitle,
+                peer.ocrTitle.ifBlank { peer.title },
+                existing
+            )
             if (matched == null) {
                 val lowest = peer.history.minOfOrNull { it.priceCents }
                 val newest = peer.history.maxByOrNull { it.recordedAt }
@@ -273,6 +309,7 @@ class ProductRepository(
                     ProductPrice(
                         title = peer.title,
                         normalizedTitle = peer.normalizedTitle,
+                        ocrTitle = peer.ocrTitle.ifBlank { peer.title },
                         priceCents = newest?.priceCents ?: lowest ?: 0L,
                         firstSeenAt = peer.firstSeenAt,
                         updatedAt = newest?.recordedAt ?: peer.firstSeenAt
@@ -299,7 +336,8 @@ class ProductRepository(
                             priceCents = record.priceCents,
                             recordedAt = record.recordedAt,
                             deviceId = record.deviceId,
-                            deviceName = record.deviceName
+                            deviceName = record.deviceName,
+                            autoSaved = record.autoSaved
                         )
                     )
                     insertedCount++
@@ -321,16 +359,19 @@ class ProductRepository(
     }
 
     // 把远端墓碑作用到本地数据：命中的商品/历史记录直接删除。
-    // 墓碑带删除时间——本地数据若在删除之后又记过价（对端重新保存），保留本地数据
+    // 墓碑带删除时间——本地数据若在删除之后又记过价（对端重新保存），保留本地数据。
+    // 删行前先收集历史条目 id：行没了之后本机截图文件要一并清掉，避免孤儿文件堆积
     private suspend fun applyPeerTombstones(tombstones: List<PeerTombstone>) {
         if (tombstones.isEmpty()) return
         val products = dao.getAllOnce()
+        val removedHistoryIds = mutableListOf<Long>()
         tombstones.forEach { t ->
             when (t.targetType) {
                 "product" -> {
                     val target = products.firstOrNull { it.normalizedTitle == t.keyTitle } ?: return@forEach
                     val newest = dao.getHistoryForProductOnce(target.id).maxOfOrNull { it.recordedAt } ?: 0
                     if (newest <= t.deletedAt) {
+                        removedHistoryIds += dao.getHistoryIdsForProduct(target.id)
                         dao.deleteHistoryForProduct(target.id)
                         dao.deleteProductById(target.id)
                     }
@@ -338,6 +379,7 @@ class ProductRepository(
                 "history" -> {
                     val productIds = dao.findHistoryProductIdsBySyncKey(t.recordedAt, t.deviceId)
                     if (productIds.isEmpty()) return@forEach
+                    removedHistoryIds += dao.findHistoryIdsBySyncKey(t.recordedAt, t.deviceId)
                     dao.deleteHistoryBySyncKey(t.recordedAt, t.deviceId)
                     // 受影响商品重算：跟随最新记录；历史删空则连同商品删除
                     productIds.forEach { productId ->
@@ -354,15 +396,23 @@ class ProductRepository(
                 }
             }
         }
+        if (removedHistoryIds.isNotEmpty()) {
+            screenshotStore.deleteFor(removedHistoryIds)
+        }
     }
 
-    private fun DetectedProduct.toHistory(productId: Long, recordedAt: Long): ProductPriceHistory =
+    private fun DetectedProduct.toHistory(
+        productId: Long,
+        recordedAt: Long,
+        autoSaved: Boolean = false
+    ): ProductPriceHistory =
         ProductPriceHistory(
             productId = productId,
             title = title,
             priceCents = priceCents,
             recordedAt = recordedAt,
             deviceId = deviceId,
-            deviceName = deviceName
+            deviceName = deviceName,
+            autoSaved = autoSaved
         )
 }

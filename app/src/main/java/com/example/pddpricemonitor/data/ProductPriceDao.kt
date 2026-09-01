@@ -76,9 +76,15 @@ interface ProductPriceDao {
     @Query("SELECT productId FROM product_price_history WHERE recordedAt = :recordedAt AND deviceId = :deviceId")
     suspend fun findHistoryProductIdsBySyncKey(recordedAt: Long, deviceId: String): List<Long>
 
+    @Query("SELECT id FROM product_price_history WHERE recordedAt = :recordedAt AND deviceId = :deviceId")
+    suspend fun findHistoryIdsBySyncKey(recordedAt: Long, deviceId: String): List<Long>
+
     @Query("DELETE FROM product_price_history WHERE recordedAt = :recordedAt AND deviceId = :deviceId")
     suspend fun deleteHistoryBySyncKey(recordedAt: Long, deviceId: String)
 
     @Query("SELECT * FROM product_price_history WHERE productId = :productId")
     suspend fun getHistoryForProductOnce(productId: Long): List<ProductPriceHistory>
+
+    @Query("SELECT id FROM product_price_history WHERE productId = :productId")
+    suspend fun getHistoryIdsForProduct(productId: Long): List<Long>
 }

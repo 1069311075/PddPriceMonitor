@@ -73,7 +73,7 @@ class ProductTextParser {
         "(\\u98DF\\u54C1\\u56DE\\u5934\\u5BA2\\u597D\\u5E97|\\u9632\\u8150\\u5242|" +
             "\\u9650\\u65F6|\\u7ACB\\u51CF|\\u9884\\u8BA1|\\u73B0\\u4E0B\\u5355|\\u9001\\u8FBE|" +
             "\\u5E73\\u53F0\\u5238|\\u540E\\u5929\\u8FBE|\\u4ECA\\u5929\\u4E0B\\u5355|" +
-            "\\u540C\\u6B3E\\u70ED\\u9500|\\u6700\\u8FD1\\d*\\u6708\\u751F\\u4EA7|" +
+            "\\u540C\\u6B3E\\u70ED\\u9500|\\u6700\\u8FD1\\s*\\d*\\s*\\u6708\\u751F\\u4EA7|" +
             "\\u4F18\\u9009\\u539F|\\u4EBA\\u597D\\u8BC4|\\u7269\\u6D41|" +
             "\\u4EF7\\u683C\\u5B9E\\u60E0|\\u8BE5\\u5E97|\\u8FDE\\u7EED\\d*|" +
             "\\d+\\u4EBA\\u5728(\\u62A2)?\\u4F18\\u60E0|\\u6700\\u540E\\d+\\u5929|" +
@@ -83,7 +83,8 @@ class ProductTextParser {
             "\\u9500\\u699C|\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|" +
             "\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C\\u5546\\u54C1|\\u70ED\\u9500\\u77E5\\u540D\\u54C1\\u724C|" +
             "\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500|\\u5E97\\u94FA\\u4FDD\\u969C|" +
-            "\\u4E13\\u5C5E\\u552E\\u540E|\\u95EA\\u7535\\u9000\\u6362|\\u5546\\u54C1\\u8BE6\\u60C5)"
+            "\\u4E13\\u5C5E\\u552E\\u540E|\\u95EA\\u7535\\u9000\\u6362|\\u5546\\u54C1\\u8BE6\\u60C5|" +
+            "\\u56DE\\u5934\\u5BA2\\u98D9\\u5347|\\u5168\\u5E97\\d)"
     )
     private val leadingTitleBadgeRegex = Regex(
         "^\\s*(\\u767E\\u4EBF\\u8865\\u8D34\\s*)?(\\u79D2\\u6740\\s*)?" +
@@ -98,7 +99,7 @@ class ProductTextParser {
             "\\u9650\\u65F6|\\u7ACB\\u51CF|\\u9884\\u8BA1|\\u73B0\\u4E0B\\u5355|\\u9001\\u8FBE|" +
             "\\u540E\\u5929\\u8FBE|\\u4ECA\\u5929\\u4E0B\\u5355|" +
             "\\u5373\\u5C06\\u5356\\u5B8C|\\u4EBA\\u60F3\\u62FC|\\u4EBA\\u5728\\u62FC|\\u597D\\u8BC4|" +
-            "\\u5929\\u5185|\\u4EBA\\u4E70\\u8FC7|\\u6708\\u9500|\\u4EBA\\u770B\\u8FC7|" +
+            "\\u4EBA\\u4E70\\u8FC7|\\u6708\\u9500|\\u4EBA\\u770B\\u8FC7|" +
             "\\u76F4\\u64AD|\\u5206\\u671F|\\u4F4E\\u81F3|\\u5E73\\u53F0\\u5238|" +
             "\\u53C2\\u6570|\\u9891\\u7387|mhz|gbps|gddr|\\u4F4D\\u5BBD|\\u7535\\u6E90|" +
             "\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C\\u5546\\u54C1|\\u70ED\\u9500\\u77E5\\u540D\\u54C1\\u724C|" +
@@ -118,9 +119,35 @@ class ProductTextParser {
 
     fun parseWithReason(text: Text, bitmap: Bitmap? = null): ProductParseResult {
         val lines = flattenLines(text, bitmap)
-        parseDetailProduct(lines)?.let { return ProductParseResult(listOf(it)) }
-        return ProductParseResult(emptyList(), "Skipped: not a clear product detail page")
+        val lineDumps = lines.map { it.toDump() }
+        parseDetailProduct(lines)?.let {
+            return ProductParseResult(listOf(it.product), lines = lineDumps, titleRect = it.titleRect)
+        }
+        return ProductParseResult(
+            emptyList(),
+            "Skipped: not a clear product detail page",
+            lineDumps
+        )
     }
+
+    // 第二遍高分辨率重识别（方案A）：把裁剪放大后重新 OCR 得到的原始行文本
+    // 用与第一遍完全相同的清理管线组装成标题
+    fun buildTitleFromRawLines(rawLines: List<String>): String =
+        normalizeDisplayTitle(cleanupTitleText(rawLines.joinToString(" ")))
+
+    private fun OcrLine.toDump() = OcrLineDump(
+        text = text,
+        left = rect.left,
+        top = rect.top,
+        right = rect.right,
+        bottom = rect.bottom,
+        darkRatio = darkRatio,
+        lightRatio = lightRatio,
+        redRatio = redRatio,
+        greenRatio = greenRatio,
+        screenHeight = screenHeight,
+        screenWidth = screenWidth
+    )
 
     private fun flattenLines(text: Text, bitmap: Bitmap?): List<OcrLine> =
         text.textBlocks
@@ -149,25 +176,41 @@ class ProductTextParser {
             }
             .sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
 
-    private fun parseDetailProduct(lines: List<OcrLine>): DetectedProduct? {
-        return parseByBlackTitle(lines) ?: parseByMainPriceBand(lines)
+    // 解析结果 + 标题行区域：黑体主路径能拿到标题行集合，透出 rect 供第二遍重识别裁剪
+    private data class DetailParse(
+        val product: DetectedProduct,
+        val titleRect: Rect?
+    )
+
+    private fun parseDetailProduct(lines: List<OcrLine>): DetailParse? {
+        return parseByBlackTitle(lines) ?: parseByMainPriceBand(lines)?.let { DetailParse(it, null) }
     }
 
-    private fun parseByBlackTitle(lines: List<OcrLine>): DetectedProduct? {
+    private fun parseByBlackTitle(lines: List<OcrLine>): DetailParse? {
         val bottomPrice = findBottomRightPrice(lines) ?: return null
         val priceLine = bottomPrice.line
         val titleLine = findMainTitleLineAboveBottomBar(lines, priceLine)
-        val title = titleLine?.let { collectTitleFromBlackLines(lines, it) }
+        val titleLines = titleLine?.let { collectTitleFromBlackLines(lines, it) }
+        val blackTitle = titleLines?.let {
+            normalizeDisplayTitle(it.joinToString("") { line -> cleanupTitleText(line.text) })
+                ?.takeIf { title -> isLikelyTitle(title) }
+        }
+        val title = blackTitle
             ?: findLooseDetailTitleNearPrice(lines, priceLine)
             ?: return null
         val normalized = normalizeTitle(title)
         if (normalized.length < 6) return null
 
-        return DetectedProduct(
-            title = title,
-            normalizedTitle = normalized,
-            priceCents = bottomPrice.cents,
-            rawText = priceLine.text
+        return DetailParse(
+            DetectedProduct(
+                title = title,
+                normalizedTitle = normalized,
+                priceCents = bottomPrice.cents,
+                rawText = priceLine.text,
+                ocrTitle = title
+            ),
+            // 标题确实来自黑体行拼接时才透出 rect；落到 loose 兜底路径时行集合与最终标题无关
+            titleRect = blackTitle?.let { titleLines?.let { lines -> unionRect(lines) } }
         )
     }
 
@@ -184,7 +227,8 @@ class ProductTextParser {
             title = title,
             normalizedTitle = normalized,
             priceCents = price,
-            rawText = priceLine.text
+            rawText = priceLine.text,
+            ocrTitle = title
         )
     }
 
@@ -239,7 +283,7 @@ class ProductTextParser {
         val normalized = normalizeTitle(cleaned)
         if (normalized.length < 10) return false
         if (isTitleStopLine(cleaned)) return false
-        if (obviousNonTitleRegex.containsMatchIn(cleaned)) return false
+        if (isObviousNonTitle(cleaned)) return false
         if (extractPriceCents(cleaned) != null) return false
 
         val hasBrandOrSpec =
@@ -260,7 +304,7 @@ class ProductTextParser {
         if (line.greenRatio < 0.35) score += 25 else score -= 60
         score += line.rect.height().coerceAtMost(70)
         score -= (priceLine.rect.top - line.rect.bottom).coerceAtLeast(0) / 25
-        if (obviousNonTitleRegex.containsMatchIn(cleaned)) score -= 160
+        if (isObviousNonTitle(cleaned)) score -= 160
         return score
     }
 
@@ -281,7 +325,7 @@ class ProductTextParser {
                     (
                         isTitleLineRelated(seed, line) &&
                             normalizeTitle(cleanupTitleText(line.text)).length >= 5 &&
-                            !obviousNonTitleRegex.containsMatchIn(cleanupTitleText(line.text))
+                            !isObviousNonTitle(cleanupTitleText(line.text))
                         )
             }
             .map { cleanupTitleText(it.text) }
@@ -298,6 +342,7 @@ class ProductTextParser {
         val linePrice = lines
             .filter { it.rect.top >= minTop || it.rect.bottom >= sample.screenHeight * 0.94 }
             .filter { it.rect.right >= minLeft }
+            .filterNot { isSingleBuyPriceLine(it, lines) }
             .filterNot { isBadPriceContext(it.text) && !isExplicitBottomPriceLine(it.text) }
             .filterNot { isForbiddenBottomPriceLine(it.text) }
             .mapNotNull { line ->
@@ -313,6 +358,7 @@ class ProductTextParser {
         val bottomLines = lines
             .filter { it.rect.top >= minTop || it.rect.bottom >= it.screenHeight * 0.94 }
             .filter { it.rect.right >= minLeft }
+            .filterNot { isSingleBuyPriceLine(it, lines) }
             .filterNot { isForbiddenBottomPriceLine(it.text) }
 
         val explicitLinePrice = bottomLines
@@ -338,6 +384,22 @@ class ProductTextParser {
         return BottomPrice(best.line, cents)
     }
 
+    // 底栏左列「单独购买」上方的价格是单买价，不是本应用追踪的拼单价（香水页案例：
+    // 右列拼单价「首件36.5」被防噪规则误杀后，左列单买价「Y79」成为唯一候选胜出）。
+    // 判定：价格行与含「单独购买」的标签行横向重叠且纵向紧邻（±130px）、自身不含拼单语境
+    private fun isSingleBuyPriceLine(line: OcrLine, lines: List<OcrLine>): Boolean {
+        if (line.text.contains("\u62FC\u5355")) return false
+        return lines.any { other ->
+            other !== line &&
+                other.text.contains("\u5355\u72EC\u8D2D\u4E70") &&
+                !other.text.contains("\u62FC\u5355") &&
+                other.rect.top < line.rect.bottom + 130 &&
+                line.rect.top < other.rect.bottom + 130 &&
+                other.rect.left < line.rect.right &&
+                line.rect.left < other.rect.right
+        }
+    }
+
     private fun extractBottomBarPriceCents(line: OcrLine): Long? {
         extractPriceCents(line)?.let { return it }
         extractPriceCentsFromElements(line)?.let { return it }
@@ -347,7 +409,8 @@ class ProductTextParser {
         }
         if (!Regex(
                 "(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|" +
-                    "\\u5373\\u5C06\\u5356\\u5B8C|\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355)"
+                    "\\u5373\\u5C06\\u5356\\u5B8C|\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355|" +
+                    "\\u8865\\u8D34|\\u9996\\u4EF6)"
             ).containsMatchIn(text)
         ) {
             return null
@@ -370,6 +433,16 @@ class ProductTextParser {
             likelyMissingDecimalPriceContextRegex.containsMatchIn(lineText)
         ) {
             return digits.toLongOrNull()
+        }
+        // 底栏行「补贴剩17件3591」实为 ¥359.1：¥ 和小数点都被 OCR 丢失时，3-5 位数字
+        // 按末位 1 位小数重建（3591 → ¥359.1）。PDD 底栏补贴价几乎都是 1 位小数
+        // （359.1/417.5），且只有无 ¥ 无小数点、带补贴语境的行走此分支
+        if (
+            digits.length in 3..5 &&
+            !lineText.any { it == '\u00A5' || it == '\uFFE5' } &&
+            lineText.contains("\u8865\u8D34")
+        ) {
+            return digits.toLongOrNull()?.times(10L)
         }
         return parsePlainPriceText(value)
     }
@@ -410,7 +483,7 @@ class ProductTextParser {
         Regex(
             "(\\u5238\\u540E|\\u9650\\u65F6|\\u9650\\u91CF\\u4EF7|\\u79D2\\u6740\\u4EF7|" +
                 "\\u6700\\u540E\\d*\\u5206\\u949F|\\u53D1\\u8D77\\u62FC\\u5355|" +
-                "\\u7ACB\\u5373\\u62FC\\u5355|\\u60CA\\u559C\\u7279\\u4EF7)"
+                "\\u7ACB\\u5373\\u62FC\\u5355|\\u60CA\\u559C\\u7279\\u4EF7|\\u9996\\u4EF6)"
         ).containsMatchIn(text) &&
             (
                 text.any { it == '\u00A5' || it == '\uFFE5' } ||
@@ -433,7 +506,7 @@ class ProductTextParser {
     private fun bottomPriceLineScore(line: OcrLine): Int {
         var score = 0
         if (line.text.any { it == '\u00A5' || it == '\uFFE5' }) score += 140
-        if (Regex("(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7)").containsMatchIn(line.text)) score += 50
+        if (Regex("(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|\\u9996\\u4EF6)").containsMatchIn(line.text)) score += 50
         if (Regex("(\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355)").containsMatchIn(line.text)) score += 35
         score += priceTextHeight(line).coerceAtMost(90)
         score += (line.rect.bottom / 20)
@@ -443,7 +516,7 @@ class ProductTextParser {
         return score
     }
 
-    private fun collectTitleFromBlackLines(lines: List<OcrLine>, firstLine: OcrLine): String? {
+    private fun collectTitleFromBlackLines(lines: List<OcrLine>, firstLine: OcrLine): List<OcrLine>? {
         val nearby = lines
             .filter { it.rect.top >= firstLine.rect.top - 130 }
             .filter { it.rect.top <= firstLine.rect.top + 220 }
@@ -471,9 +544,15 @@ class ProductTextParser {
             previousBottom = line.rect.bottom
         }
 
-        val title = normalizeDisplayTitle(titleLines.joinToString("") { cleanupTitleText(it.text) })
-        return title.takeIf { isLikelyTitle(it) }
+        return titleLines.takeIf { it.isNotEmpty() }
     }
+
+    private fun unionRect(lines: List<OcrLine>): Rect = Rect(
+        lines.minOf { it.rect.left },
+        lines.minOf { it.rect.top },
+        lines.maxOf { it.rect.right },
+        lines.maxOf { it.rect.bottom }
+    )
 
     private fun findMainDetailPriceLine(lines: List<OcrLine>): OcrLine? {
         val screenHeight = lines.firstOrNull { it.screenHeight > 0 }?.screenHeight ?: return null
@@ -611,11 +690,11 @@ class ProductTextParser {
         return compact.length >= 8 &&
             !isTitleStopLine(cleaned) &&
             !isShopOrGuaranteeLine(cleaned) &&
-            !obviousNonTitleRegex.containsMatchIn(cleaned) &&
+            !isObviousNonTitle(cleaned) &&
             extractPriceCents(cleaned) == null &&
             cleaned.any { it in '\u4e00'..'\u9fff' || it.isLetter() } &&
             line.redRatio < 0.18 &&
-            line.greenRatio < 0.16 &&
+            (line.greenRatio < 0.16 || isGreenOnlyFromInkBadge(line)) &&
             !isDarkBackgroundLine(line) &&
             (isBlackTitleLine(line) || isWeakBlackTitleLine(line))
     }
@@ -631,16 +710,25 @@ class ProductTextParser {
         }
         if (line.darkRatio >= 0.055) score += 70
         if (line.lightRatio >= 0.38) score += 55 else score -= 85
-        if (line.redRatio < 0.08) score += 35 else score -= 70
-        if (line.greenRatio < 0.08) score += 35 else score -= 70
+        if (line.redRatio < 0.08) {
+            score += 35
+        } else if ((line.darkRatio - line.redRatio).coerceAtLeast(0.0) < 0.10) {
+            // 红色超标但行内非红墨色充足（dark-red ≥ 0.10）说明是"红角标+黑正文"混合行
+            // ——百亿补贴红标常与标题同框被 OCR 合并成一行，免罚；纯红标行 dark-red≈0 照罚
+            score -= 70
+        }
+        if (line.greenRatio < 0.08 || isGreenOnlyFromInkBadge(line)) score += 35 else score -= 70
         score += line.rect.height().coerceAtMost(80)
 
         val distance = (priceLine.rect.top - line.rect.bottom).coerceAtLeast(0)
         score -= distance / 18
 
         if (titleStopRegex.containsMatchIn(cleaned)) score -= 120
-        if (Regex("(\\u9000\\u8D27|\\u53D1\\u8D27|\\u4FDD\\u969C|\\u5BA2\\u670D|\\u597D\\u8D27|\\u54C1\\u724C\\u56DE\\u5934)").containsMatchIn(cleaned)) {
-            score -= 100
+        if (afterSalesWordRegex.containsMatchIn(cleaned) && isPureAfterSalesLine(cleaned)) {
+            // 纯售后行（剥完售后词余量<8字）永远不该当标题种子：芒果页案例——服务承诺
+            // 行被 PDD 渲染成小黑字，吃满黑体行+260加分后 -100 压不住真标题。罚分提到
+            // 压倒性量级；「带售后承诺的真标题」（余量≥8字）不受影响，只罚纯售后行
+            score -= 1000
         }
         return score
     }
@@ -649,7 +737,7 @@ class ProductTextParser {
         if (!isLooseTitleLine(line)) return false
         if (line == firstLine) return true
         if (!isTitleLineRelated(firstLine, line)) return false
-        if (line.greenRatio >= 0.12 || line.redRatio >= 0.14) return false
+        if ((line.greenRatio >= 0.12 && !isGreenOnlyFromInkBadge(line)) || line.redRatio >= 0.14) return false
         return isBlackTitleLine(line)
     }
 
@@ -660,7 +748,7 @@ class ProductTextParser {
         if (compact.length < 6) return false
         if (isTitleStopLine(cleaned)) return false
         if (isShopOrGuaranteeLine(cleaned) && !hasTitlePrefix) return false
-        if (obviousNonTitleRegex.containsMatchIn(cleaned)) return false
+        if (isObviousNonTitle(cleaned)) return false
         if (extractPriceCents(cleaned) != null) return false
         if (!cleaned.any { it in '\u4e00'..'\u9fff' || it.isLetter() }) return false
         if (!isTitleLineRelated(firstLine, line)) return false
@@ -684,7 +772,7 @@ class ProductTextParser {
         if (compact.length < 6) return false
         if (isTitleStopLine(cleaned)) return false
         if (isShopOrGuaranteeLine(cleaned)) return false
-        if (obviousNonTitleRegex.containsMatchIn(cleaned)) return false
+        if (isObviousNonTitle(cleaned)) return false
         if (extractPriceCents(cleaned) != null) return false
         if (!cleaned.any { it in '\u4e00'..'\u9fff' || it.isLetter() }) return false
         if (!isTitleLineRelated(firstLine, line)) return false
@@ -754,6 +842,31 @@ class ProductTextParser {
             }
             .filter { it in 1..999_999_00 }
             .minOrNull()
+
+    // 价格二遍精识别的候选读数：放大重读价格行后，行内全部 ¥ 价格（含划线价）+ 是否带显式小数点。
+    // 全量返回而非取 min：候选与第一遍读数的数量级比对由调用方裁决（划线价比现价大，
+    // 盲取 min 可能在多价格行里选错）
+    data class ZoomPriceCandidate(val cents: Long, val hasDecimal: Boolean)
+
+    // 放大重读常把 ¥ 一起读丢（"补贴价 限时58.9"），裸小数兜底：价格行里带小数点的
+    // 数字串只能是价格（销量/库存/件数都不带小数点），无需 ¥ 锚点
+    private val bareDecimalRegex = Regex("(?<!\\d)(\\d{1,6})\\.(\\d{1,2})(?!\\d)")
+
+    fun zoomedPriceCandidates(text: String): List<ZoomPriceCandidate> {
+        val out = mutableListOf<ZoomPriceCandidate>()
+        priceRegex.findAll(text).forEach { match ->
+            val yuan = match.groupValues[1].toLongOrNull() ?: return@forEach
+            val decimalText = match.groupValues.getOrNull(2).orEmpty()
+            val cents = yuan * 100 + (decimalText.padEnd(2, '0').take(2).toLongOrNull() ?: 0L)
+            if (cents in 1..999_999_00) out += ZoomPriceCandidate(cents, decimalText.isNotBlank())
+        }
+        bareDecimalRegex.findAll(text).forEach { match ->
+            val yuan = match.groupValues[1].toLongOrNull() ?: return@forEach
+            val cents = yuan * 100 + (match.groupValues[2].padEnd(2, '0').take(2).toLongOrNull() ?: 0L)
+            if (cents in 1..999_999_00) out += ZoomPriceCandidate(cents, true)
+        }
+        return out.distinct().toList()
+    }
 
     private fun extractPriceCents(text: String): Long? =
         priceRegex.findAll(text)
@@ -831,10 +944,18 @@ class ProductTextParser {
         return (yuan * 100 + cents).takeIf { it in 1..999_999_00 }
     }
 
+    // 黑墨充足行（dark ≥ 0.15）绿色容忍度放宽到 0.22：真绿色营销行绿字不暗（dark≈0），
+    // 一行 15% 以上像素是真黑字时绿只可能来自行内小绿徽章（芒果页案例——「坏了包赔」
+    // 绿徽章贴在标题行尾被 OCR 并入同一 bbox，整行 green=0.136 压过 0.11 黑体门槛）。
+    // 绿徽章独占行（dark≈0，如梨汁页独立「坏了包赔」行 green=0.684）不满足 dark≥0.15，
+    // 照常被各绿色门槛排除
+    private fun isGreenOnlyFromInkBadge(line: OcrLine): Boolean =
+        line.darkRatio >= 0.15 && line.greenRatio < 0.22
+
     private fun isBlackTitleLine(line: OcrLine): Boolean {
         val compactLength = normalizeTitle(cleanupTitleText(line.text)).length
         return line.redRatio < 0.13 &&
-            line.greenRatio < 0.11 &&
+            (line.greenRatio < 0.11 || isGreenOnlyFromInkBadge(line)) &&
             line.lightRatio >= 0.30 &&
             line.darkRatio <= 0.42 &&
             (
@@ -900,11 +1021,56 @@ class ProductTextParser {
     private fun isTitleStopLine(text: String): Boolean =
         titleStopRegex.containsMatchIn(text)
 
+    // 毒词 + 纯物流行的组合判定。原 obviousNonTitleRegex 里含"天内"，见词整行杀，
+    // 误杀了自带物流承诺后缀的标题行（如 …【5天内发货】）——该词已移出正则，改由
+    // isPureLogisticsLine 收窄：只有剥掉"N天内…"短语后剩余不足 8 字的独立物流行才杀
+    private fun isObviousNonTitle(cleaned: String): Boolean =
+        obviousNonTitleRegex.containsMatchIn(cleaned) || isPureLogisticsLine(cleaned)
+
+    private fun isPureLogisticsLine(cleaned: String): Boolean {
+        if (!cleaned.contains("\u5929\u5185")) return false
+        val remainder = cleaned.replace(Regex("\\S*\u5929\u5185\\S*"), " ")
+        return normalizeTitle(remainder).length < 8
+    }
+
+    // 售后词（退货/发货/保障/客服/好货/品牌回头）与"天内"毒词同坑：PDD 商家爱把发货
+    // 承诺写进标题（如 …【5天内发货】），见词就罚 -100 会让真标题行打输给无关行。
+    // 剥词验余量（与 isPureLogisticsLine 同范式）：售后短语连同数字/时间前缀和短后缀
+    // 剥掉后，剩余正文 >= 8 字的是"带售后承诺的标题"免罚；纯售后行剥完所剩无几，照罚。
+    // 秒退/无理由/包赔：芒果页案例——「未发货秒退·不支持7天无理由退换·坏了包赔」里
+    // 「退货」被「无理由」三字挡住、「坏了包赔」整体是售后承诺，词表不全导致剥完剩
+    // 17 字 ≥8 被误判为"带售后的标题"，纯售后行反而胜出抢走真标题
+    private val afterSalesWordRegex = Regex("(\u9000\u8D27|\u53D1\u8D27|\u4FDD\u969C|\u5BA2\u670D|\u597D\u8D27|\u54C1\u724C\u56DE\u5934|\u79D2\u9000|\u65E0\u7406\u7531|\u5305\u8D54)")
+
+    private fun isPureAfterSalesLine(cleaned: String): Boolean {
+        val phraseRegex = Regex("[\\d\u4E00-\u9FFFa-zA-Z]{0,6}(${afterSalesWordRegex.pattern})[\u4E00-\u9FFF]{0,6}")
+        var remainder = cleaned
+        while (true) {
+            val next = remainder.replaceFirst(phraseRegex, " ")
+            if (next == remainder) break
+            remainder = next
+        }
+        return normalizeTitle(remainder).length < 8
+    }
+
     private fun cleanupTitleText(text: String): String =
         text.replace(priceRegex, " ")
             .replace(Regex("^\\s*(618\\s*)?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u6536\\u85CF\\s*[|\\uFF5C]?\\s*"), " ")
+            // 徽章行与标题首行被 OCR 合并成一行时（如"百亿小贴品牌索尼1339人收藏|香港直邮 索尼PS4游"），
+            // "百亿补贴"已被误读无法按字面匹配——锚定徽章关键词+计数后缀（N人收藏/N人回购该品牌）
+            // 双重条件剥离：前缀必须含百亿/品牌/官方等徽章词，防止误伤标题中部营销文案里的同形短语
+            .replace(Regex("^[\\s\\S]{0,10}?(?:\\u767E\\u4EBF|\\u5343\\u4EBF|\\u54C1\\u724C|\\u5B98\\u65B9|\\u65D7\\u8230|\\u4E13\\u8425|\\u4E13\\u5356|\\u79D2\\u6740|618)[\\s\\S]{0,12}?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?(?:\\u4EBA\\u6536\\u85CF|\\u4EBA\\u56DE\\u8D2D\\u8BE5\\u54C1\\u724C)\\s*[|\\uFF5C]?\\s*"), " ")
+            // 同族徽章变体：计数短语是"热销N万件/好评N条"（如"百贴品牌索尼百补品牌热销296.2万件|香港直"，
+            // OCR 把"该品牌累计热销"误读成"百补品牌热销"）。PDD 徽章文案会轮换，同样的徽章关键词
+            // 锚定剥到计数短语为止；"件/条"强制收尾，防止误伤"旗舰店 2024新款 20件装"这类规格文本
+            .replace(Regex("^[\\s\\S]{0,10}?(?:\\u767E\\u4EBF|\\u5343\\u4EBF|\\u54C1\\u724C|\\u5B98\\u65B9|\\u65D7\\u8230|\\u4E13\\u8425|\\u4E13\\u5356|\\u79D2\\u6740|618)[\\s\\S]{0,8}?(?:\\u7D2F\\u8BA1)?(?:\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6|\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761)\\s*[|\\uFF5C]?\\s*"), " ")
             .replace(Regex("\\u54C1\\u724C\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761\\s*[|\\uFF5C]?"), " ")
             .replace(Regex("\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6"), " ")
+            .replace(Regex("\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u56DE\\u8D2D\\u8BE5\\u54C1\\u724C"), " ")
+            // 「百亿补贴 品牌」徽章被误读成「百E品牌/百贴品牌/百亿小贴品牌/百1贴品牌」等变体时：
+            // 计数短语锚点规则失效（本变体无计数短语）、字面匹配也失效。中间字符限定为
+            // 补贴误读字母表（贴亿补小Ee外+数字，亿会被读成1），不会吞掉「百果园品牌」真品牌文本
+            .replace(Regex("^\\s*\\u767E[\\u8D34\\u4EBF\\u8865\\u5C0FEe\\u59160-9]{0,4}\\s*\\u54C1\\u724C\\s*[|\\uFF5C]?\\s*"), " ")
             .replace(Regex("(\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|\\u964D\\u4EF7\\u8865\\u5DEE|\\u6B63\\u54C1\\u53D1\\u7968|\\u987A\\u4E30\\u5305\\u90AE|\\u540E\\u5929\\u8FBE|24\\u5C0F\\u65F6\\u53D1\\u8D27|\\u4E70\\u8D35\\u53CC\\u500D\\u8D54)"), " ")
             .replace(Regex("[\\[\\]{}()\\uFF08\\uFF09|]+"), " ")
             .replace(Regex("\\s+"), " ")
@@ -918,14 +1084,22 @@ class ProductTextParser {
 
     private fun String.substringFromBrandBracket(): String {
         val index = indexOf('\u3010')
-        return if (index >= 0) substring(index) else this
+        if (index < 0) return this
+        // 【…】在标题尾部（如物流承诺后缀【5天内发货】【9月1日发完】）时，从【截取会把整条标题
+        // 截成只剩后缀。品牌括号后面必跟商品描述：括号不在行首且】后归一化不足 6 字
+        // 说明是尾部后缀而非品牌段，保留原文（行首括号截取是恒等变换，不受此约束）
+        val close = indexOf('\u3011', index)
+        if (index > 0 && close >= 0 && normalizeTitle(substring(close + 1)).length < 6) return this
+        // 截取结果归一化后不足 6 字说明【不在品牌名位置，保留原文
+        val candidate = substring(index)
+        return if (normalizeTitle(candidate).length >= 6) candidate else this
     }
 
     private fun isLikelyTitle(text: String): Boolean {
         val compact = normalizeTitle(text)
         return compact.length >= 6 &&
             !isTitleStopLine(text) &&
-            !obviousNonTitleRegex.containsMatchIn(text) &&
+            !isObviousNonTitle(text) &&
             extractPriceCents(text) == null &&
             text.any { it in '\u4e00'..'\u9fff' || it.isLetter() } &&
             titleScore(text) >= 10

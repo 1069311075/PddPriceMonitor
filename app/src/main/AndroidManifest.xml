@@ -15,6 +15,11 @@
     <queries>
         <package android:name="com.xunmeng.pinduoduo" />
         <package android:name="com.xunmeng.pinduoduo.lite" />
+        <!-- 比价应用选择器：枚举全部可启动应用 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application
@@ -34,6 +39,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 剪贴板中转页：透明无 UI，获得前台焦点后写剪贴板再唤起比价应用，
+             规避服务后台写剪贴板触发 MIUI 系统剪贴板悬浮窗 -->
+        <activity
+            android:name=".compare.ClipRelayActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name=".capture.ScreenCaptureService"

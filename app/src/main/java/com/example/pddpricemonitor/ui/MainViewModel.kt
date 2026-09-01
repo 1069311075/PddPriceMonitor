@@ -5,10 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.example.pddpricemonitor.data.ProductPrice
 import com.example.pddpricemonitor.data.ProductPriceHistory
 import com.example.pddpricemonitor.data.ProductRepository
+import com.example.pddpricemonitor.data.ScreenshotStore
 import com.example.pddpricemonitor.sync.DiscoveredRoom
 import com.example.pddpricemonitor.sync.SyncController
 import com.example.pddpricemonitor.sync.SyncState
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -18,10 +20,20 @@ import javax.inject.Inject
 @HiltViewModel
 class MainViewModel @Inject constructor(
     private val repository: ProductRepository,
-    val sync: SyncController
+    val sync: SyncController,
+    val screenshotStore: ScreenshotStore
 ) : ViewModel() {
     val products: StateFlow<List<ProductPrice>> = repository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // 截图存档开关：主界面 UI 状态；识别服务每次识别时直接读 ScreenshotStore 的持久化值
+    private val _saveScreenshots = MutableStateFlow(screenshotStore.isEnabled())
+    val saveScreenshots: StateFlow<Boolean> = _saveScreenshots
+
+    fun setSaveScreenshots(enabled: Boolean) {
+        screenshotStore.setEnabled(enabled)
+        _saveScreenshots.value = enabled
+    }
 
     val syncState: StateFlow<SyncState> = sync.state
 

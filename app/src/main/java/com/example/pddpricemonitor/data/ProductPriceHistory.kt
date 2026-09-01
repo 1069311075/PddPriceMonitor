@@ -25,5 +25,8 @@ data class ProductPriceHistory(
     val recordedAt: Long,
     // 记录来源设备：本机记的与同步来的区分开，折线图按设备着色
     val deviceId: String = "local",
-    val deviceName: String = "本机"
+    val deviceName: String = "本机",
+    // 识别后自动保存（未经用户在面板上点确认）的记录。历史明细中以「自动记录」灰字
+    // 区分人工确认过的记录；错价回溯时优先核对带此标的行
+    val autoSaved: Boolean = false
 )

@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.pddpricemonitor.R
+import com.example.pddpricemonitor.data.ScreenshotStore
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,9 @@ class ScreenCaptureService : Service() {
 
     @Inject
     lateinit var ocrInteractor: OcrCaptureInteractor
+
+    @Inject
+    lateinit var screenshotStore: ScreenshotStore
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var worker: Job? = null
@@ -89,20 +93,39 @@ class ScreenCaptureService : Service() {
         worker = scope.launch {
             overlayController?.updateState(BallState.SCANNING, showPanel = false)
 
-            val result = ocrInteractor.captureOnce { controller.acquireBitmap() }
+            val result = ocrInteractor.captureOnce(
+                bitmapProvider = { controller.acquireBitmap() },
+                onScreenshot = if (screenshotStore.isEnabled()) {
+                    { bitmap -> screenshotStore.savePending(bitmap) }
+                } else null
+            )
 
             when (result) {
                 is OcrCaptureInteractor.CaptureResult.Success -> {
+                    // 识别后自动保存（默认关）：识别即入库（历史行打 autoSaved 标），
+                    // 面板转为「回执」——对了不用管，错了点「修改保存」或「重新识别」。
+                    // 入库失败（id≤0）时按普通模式弹面板，用户手动点保存兜底
+                    val autoSavedId = if (autoSaveEnabled()) {
+                        val historyId = ocrInteractor.saveManualProduct(
+                            result.product,
+                            autoSaved = true
+                        )
+                        if (historyId > 0) screenshotStore.commitFor(historyId)
+                        historyId.takeIf { it > 0 }
+                    } else null
+                    // 登记待确认行：面板「修改保存/重新识别」时撤回，用户置之不理则就此落账
+                    pendingAutoSavedHistoryId = autoSavedId
                     overlayController?.showEditableResult(
                         title = result.product.title,
                         priceCents = result.product.priceCents,
-                        comparison = result.comparison
+                        comparison = result.comparison,
+                        autoSaved = autoSavedId != null
                     )
                     MonitorDebugState.update(
-                        message = "识别成功，核对后点保存",
+                        message = if (autoSavedId != null) "已自动保存，核对结果" else "识别成功，核对后点保存",
                         textLength = 0,
                         parsedProducts = 1,
-                        savedProducts = 0
+                        savedProducts = if (autoSavedId != null) 1 else 0
                     )
                 }
                 is OcrCaptureInteractor.CaptureResult.NoProduct -> {
@@ -129,16 +152,38 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun saveEditedProduct(title: String, priceCents: Long) {
-        val product = ocrInteractor.createDetectedProduct(title, priceCents)
+    private fun autoSaveEnabled(): Boolean = CapturePrefs.isAutoSaveEnabled(this)
+
+    // 最近一次「识别后自动保存」、尚未经用户确认的历史行 id：
+    // 面板「修改保存」撤回该行再按面板值重新入库；「重新识别」视为本次作废，同样撤回
+    private var pendingAutoSavedHistoryId: Long? = null
+
+    private fun discardPendingAutoSave() {
+        val oldId = pendingAutoSavedHistoryId ?: return
+        pendingAutoSavedHistoryId = null
+        scope.launch { ocrInteractor.deleteHistoryEntry(oldId) }
+    }
+
+    private fun saveEditedProduct(title: String, priceCents: Long, ocrTitle: String) {
+        val product = ocrInteractor.createDetectedProduct(title, priceCents, ocrTitle)
         scope.launch {
-            val saved = ocrInteractor.saveManualProduct(product)
+            // 回执模式的「修改保存」：自动保存的行还没被用户确认——先撤回
+            // （截图退回暂存位、行删除、连带空壳商品清理与同步墓碑），再按面板值
+            // 重新入库，否则识别错值会留在账里，纠错就名不副实了
+            pendingAutoSavedHistoryId?.let { oldId ->
+                pendingAutoSavedHistoryId = null
+                screenshotStore.revertToPending(oldId)
+                ocrInteractor.deleteHistoryEntry(oldId)
+            }
+            val historyId = ocrInteractor.saveManualProduct(product)
+            // 把识别瞬间的暂存截图归档为该条记录的存档图（开关关闭时 pending 不存在，静默跳过）
+            if (historyId > 0) screenshotStore.commitFor(historyId)
             overlayController?.updateState(BallState.SUCCESS, showPanel = false)
             overlayController?.scheduleStatusRestore()
             MonitorDebugState.update(
                 message = "已保存",
                 parsedProducts = 1,
-                savedProducts = saved
+                savedProducts = if (historyId > 0) 1 else 0
             )
         }
     }
@@ -165,11 +210,12 @@ class ScreenCaptureService : Service() {
                         captureOnce()
                     }
 
-                    override fun onSaveClick(title: String, priceCents: Long) {
-                        saveEditedProduct(title, priceCents)
+                    override fun onSaveClick(title: String, priceCents: Long, ocrTitle: String) {
+                        saveEditedProduct(title, priceCents, ocrTitle)
                     }
 
                     override fun onReCaptureClick() {
+                        discardPendingAutoSave()
                         captureOnce()
                     }
 
