@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import com.example.pddpricemonitor.data.ProductPriceComparison
 import com.example.pddpricemonitor.data.ProductRepository
+import com.example.pddpricemonitor.data.ScreenshotStore
 import com.example.pddpricemonitor.matcher.TitleMatcher
 import com.google.mlkit.vision.text.Text
 import com.example.pddpricemonitor.ocr.DetectedProduct
@@ -66,12 +67,13 @@ class OcrCaptureInteractor @Inject constructor(
     /**
      * 执行一次完整的 OCR 识别流程
      *
-     * @param onScreenshot 截图存档回调：识别成功时在 bitmap 回收前触发，
-     *        由调用方决定是否压缩保存（开关关闭时传 null）
+     * @param onScreenshot 截图存档回调：识别成功时在 bitmap 回调前触发，
+     *        由调用方决定是否压缩保存（开关关闭时传 null）。
+     *        回调参数：截图 + 商品图裁剪区域（屏幕比例坐标，标题锚点缺失时为固定比例带）
      */
     suspend fun captureOnce(
         bitmapProvider: () -> Bitmap?,
-        onScreenshot: (suspend (Bitmap) -> Unit)? = null
+        onScreenshot: (suspend (Bitmap, ScreenshotStore.CropRegion?) -> Unit)? = null
     ): CaptureResult {
         val bitmap = bitmapProvider() ?: return CaptureResult.NoFrame
 
@@ -129,8 +131,20 @@ class OcrCaptureInteractor @Inject constructor(
                 )
             } else {
                 val comparison = repository.findPriceComparison(product!!)
+                // 商品图裁剪区域：上界避开状态栏/导航（屏高 8%），下界锚定标题行顶（含余量）；
+                // 标题锚点缺失（loose 兜底路径）退化为固定比例带
+                val crop = result.titleRect?.let { titleRect ->
+                    ScreenshotStore.CropRegion(
+                        leftRatio = 0.06f,
+                        topRatio = 0.08f,
+                        rightRatio = 0.94f,
+                        bottomRatio = (titleRect.top - titleRect.height() * 0.35f)
+                            .coerceAtLeast(bitmap.height * 0.14f)
+                            .toFloat() / bitmap.height
+                    )
+                }
                 // 截图存档：此时 bitmap 仍存活（finally 才回收），调用方压缩保存
-                onScreenshot?.invoke(bitmap)
+                onScreenshot?.invoke(bitmap, crop)
                 CaptureResult.Success(product!!, comparison)
             }
         } catch (error: Throwable) {

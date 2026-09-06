@@ -99,6 +99,12 @@ private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Dr
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val pressPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    // draw() 在识别光晕呼吸动画期间每帧调用：圆角数组与渐变 shader 全部复用，避免每帧分配
+    private val bodyRadii = FloatArray(8)
+    private val glowRadii = FloatArray(8)
+    private var bodyShader: LinearGradient? = null
+    private val shaderRect = RectF()
+
     fun setAccentColor(newColor: Int) {
         if (accent == newColor) return
         accent = newColor
@@ -145,7 +151,8 @@ private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Dr
             )
             val glowR = tabW * 0.5f + expand
             glowPath.reset()
-            glowPath.addRoundRect(glowRect, cornerRadii(glowR, glowR, glowR * 0.6f), Path.Direction.CW)
+            fillCornerRadii(glowRadii, glowR, glowR, glowR * 0.6f)
+            glowPath.addRoundRect(glowRect, glowRadii, Path.Direction.CW)
             glowPaint.style = Paint.Style.STROKE
             glowPaint.strokeWidth = m * 0.45f
             glowPaint.color = accent
@@ -155,13 +162,18 @@ private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Dr
 
         // 签体：磨砂玻璃（内侧大圆角、贴边侧小圆角）
         bodyPath.reset()
-        bodyPath.addRoundRect(bodyRect, cornerRadii(tabW * 0.5f, tabW * 0.5f, tabW * 0.3f), Path.Direction.CW)
-        bodyPaint.shader = LinearGradient(
-            bodyRect.centerX(), bodyRect.top, bodyRect.centerX(), bodyRect.bottom,
-            0xE6FFFFFF.toInt(),
-            0xB8EDEDEF.toInt(),
-            Shader.TileMode.CLAMP
-        )
+        fillCornerRadii(bodyRadii, tabW * 0.5f, tabW * 0.5f, tabW * 0.3f)
+        bodyPath.addRoundRect(bodyRect, bodyRadii, Path.Direction.CW)
+        if (bodyShader == null || shaderRect != bodyRect) {
+            shaderRect.set(bodyRect)
+            bodyShader = LinearGradient(
+                bodyRect.centerX(), bodyRect.top, bodyRect.centerX(), bodyRect.bottom,
+                0xE6FFFFFF.toInt(),
+                0xB8EDEDEF.toInt(),
+                Shader.TileMode.CLAMP
+            )
+        }
+        bodyPaint.shader = bodyShader
         canvas.drawPath(bodyPath, bodyPaint)
 
         // 描边：中性、低透明度
@@ -187,13 +199,20 @@ private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Dr
         }
     }
 
-    // 圆角：贴右缘时内侧在左（左上/左下大圆角）；贴左缘时镜像
-    private fun cornerRadii(innerR: Float, innerRy: Float, outerR: Float): FloatArray =
+    // 圆角：贴右缘时内侧在左（左上/左下大圆角）；贴左缘时镜像。写入复用数组，不分配
+    private fun fillCornerRadii(out: FloatArray, innerR: Float, innerRy: Float, outerR: Float) {
         if (onRight) {
-            floatArrayOf(innerR, innerRy, outerR, outerR, outerR, outerR, innerR, innerRy)
+            out[0] = innerR; out[1] = innerRy
+            out[2] = outerR; out[3] = outerR
+            out[4] = outerR; out[5] = outerR
+            out[6] = innerR; out[7] = innerRy
         } else {
-            floatArrayOf(outerR, outerR, innerR, innerRy, innerR, innerRy, outerR, outerR)
+            out[0] = outerR; out[1] = outerR
+            out[2] = innerR; out[3] = innerRy
+            out[4] = innerR; out[5] = innerRy
+            out[6] = outerR; out[7] = outerR
         }
+    }
 
     // 提供签体轮廓（与 draw 中的 bodyRect 一致：贴边侧无 margin），elevation 投影才能渲染
     override fun getOutline(outline: Outline) {
@@ -361,9 +380,8 @@ class FloatingOverlayController(
     }
 
     // 双击：轮换跳转用户选定的比价应用（按勾选顺序循环）。
-    // 「跳转比价时复制标题」开启时，比较意图账本：desiredTitle（最新想要的标题）与
-    // knownClipTitle（剪贴板里实际内容）不一致才经中转页复制——识别后首次双击复制一次，
-    // 之后应用间轮换纯跳转；长按卡片复制过的标题既不会被覆盖也不会重弹
+    // 复制优先、直达搜索其次——剪贴板有词是兜底线：闲鱼等不支持搜索 deeplink 的应用落首页后，
+    // 靠用户粘贴或应用自身剪贴板检测填充搜索框；复制经前台中转页完成，跳转同时带词走 deeplink
     private fun launchNextCompareApp() {
         val pkg = CompareApps.nextPackageName(context) ?: run {
             launchPdd()
@@ -374,6 +392,12 @@ class FloatingOverlayController(
         if (CompareApps.isAutoCopyTitle(context) && !desired.isNullOrBlank() && desired != CompareApps.knownClipTitle) {
             ClipRelayActivity.start(context, desired, pkg)
             return
+        }
+        if (CompareApps.isDirectSearch(context) && !desired.isNullOrBlank()) {
+            if (CompareApps.launch(context, pkg, query = desired)) {
+                Toast.makeText(context, "比价 → $label", Toast.LENGTH_SHORT).show()
+                return
+            }
         }
         if (CompareApps.launch(context, pkg)) {
             Toast.makeText(context, "比价 → $label", Toast.LENGTH_SHORT).show()
@@ -1320,12 +1344,14 @@ class FloatingOverlayController(
 
     // ---- 价格工具函数 ----
 
+    private val priceTextRegex = Regex("(\\d{1,6})(?:[.,](\\d{1,2}))?")
+
     private fun parsePriceCents(text: String): Long? {
         val normalized = text
             .replace("CNY", "", ignoreCase = true)
             .filter { it.isDigit() || it == '.' || it == ',' }
             .trim()
-        val parts = Regex("(\\d{1,6})(?:[.,](\\d{1,2}))?").find(normalized) ?: return null
+        val parts = priceTextRegex.find(normalized) ?: return null
         val yuan = parts.groupValues[1].toLongOrNull() ?: return null
         val cents = parts.groupValues.getOrNull(2).orEmpty().padEnd(2, '0').take(2).toLongOrNull() ?: 0L
         return (yuan * 100 + cents).takeIf { it in 1..999_999_00 }

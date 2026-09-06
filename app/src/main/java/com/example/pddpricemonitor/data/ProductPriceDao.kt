@@ -18,13 +18,6 @@ interface ProductPriceDao {
     @Query("SELECT * FROM product_price_history")
     suspend fun getAllHistoryOnce(): List<ProductPriceHistory>
 
-    // 同步去重键：同一商品 + 同一时刻 + 同一设备的记录视为同一条
-    @Query(
-        "SELECT COUNT(*) FROM product_price_history " +
-            "WHERE productId = :productId AND recordedAt = :recordedAt AND deviceId = :deviceId"
-    )
-    suspend fun countHistoryByKey(productId: Long, recordedAt: Long, deviceId: String): Int
-
     @Query("SELECT MIN(priceCents) FROM product_price_history WHERE productId = :productId")
     suspend fun getLowestHistoryPrice(productId: Long): Long?
 

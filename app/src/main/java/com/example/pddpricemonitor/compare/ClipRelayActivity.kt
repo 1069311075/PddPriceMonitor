@@ -39,10 +39,13 @@ class ClipRelayActivity : Activity() {
         }
 
         if (targetPackage != null) {
-            val launch = packageManager.getLaunchIntentForPackage(targetPackage)
-            if (launch != null) {
-                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                runCatching { startActivity(launch) }
+            // 与双击轮换同款跳转：直达搜索开启时带标题走 deeplink，否则落启动页
+            if (!CompareApps.launch(this, targetPackage, query = title)) {
+                val launch = packageManager.getLaunchIntentForPackage(targetPackage)
+                if (launch != null) {
+                    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    runCatching { startActivity(launch) }
+                }
             }
         }
         finish()

@@ -156,7 +156,8 @@ class ProductRepository(
                 )
                 val productId = dao.insert(inserted)
                 dao.insertHistory(detected.toHistory(productId, now))
-                existing = dao.getAllOnce()
+                // 就地补进内存列表，避免每插一个新品就全表重查一次
+                existing = existing + inserted.copy(id = productId)
                 changedCount++
             } else if (detected.priceCents < matched.priceCents) {
                 // 低价更新不覆盖标题——商品若被用户编辑过（title != ocrTitle）保持现状
@@ -289,6 +290,12 @@ class ProductRepository(
         var existing = dao.getAllOnce()
         var insertedCount = 0
         val touchedProductIds = mutableSetOf<Long>()
+        // 本地已有历史的同步键（productId → (recordedAt, deviceId)）：一次全量加载建索引，
+        // 替代逐条 countHistoryByKey 的 N+1 查询；插入时同步维护
+        val localHistoryKeys = HashMap<Long, HashSet<Pair<Long, String>>>()
+        dao.getAllHistoryOnce().forEach { h ->
+            localHistoryKeys.getOrPut(h.productId) { HashSet() }.add(h.recordedAt to h.deviceId)
+        }
 
         peerProducts.forEach { peer ->
             // 商品级墓碑命中：对方这份数据整体早于删除时间 → 视为已删数据，跳过。
@@ -305,21 +312,20 @@ class ProductRepository(
             if (matched == null) {
                 val lowest = peer.history.minOfOrNull { it.priceCents }
                 val newest = peer.history.maxByOrNull { it.recordedAt }
-                val newId = dao.insert(
-                    ProductPrice(
-                        title = peer.title,
-                        normalizedTitle = peer.normalizedTitle,
-                        ocrTitle = peer.ocrTitle.ifBlank { peer.title },
-                        priceCents = newest?.priceCents ?: lowest ?: 0L,
-                        firstSeenAt = peer.firstSeenAt,
-                        updatedAt = newest?.recordedAt ?: peer.firstSeenAt
-                    )
+                val newProduct = ProductPrice(
+                    title = peer.title,
+                    normalizedTitle = peer.normalizedTitle,
+                    ocrTitle = peer.ocrTitle.ifBlank { peer.title },
+                    priceCents = newest?.priceCents ?: lowest ?: 0L,
+                    firstSeenAt = peer.firstSeenAt,
+                    updatedAt = newest?.recordedAt ?: peer.firstSeenAt
                 )
-                // 刚插入必存在；极端情况下（插入被约束拒绝）跳过该商品继续同步其余数据
-                matched = dao.getProductById(newId) ?: return@forEach
-                existing = dao.getAllOnce()
+                val newId = dao.insert(newProduct)
+                matched = newProduct.copy(id = newId)
+                existing = existing + matched
             }
             val productId = matched.id
+            val productKeys = localHistoryKeys.getOrPut(productId) { HashSet() }
 
             peer.history.forEach { record ->
                 // 历史级墓碑命中：这条记录已被本机删除过，跳过
@@ -328,7 +334,7 @@ class ProductRepository(
                 }
                 if (recordKilled) return@forEach
 
-                if (dao.countHistoryByKey(productId, record.recordedAt, record.deviceId) == 0) {
+                if ((record.recordedAt to record.deviceId) !in productKeys) {
                     dao.insertHistory(
                         ProductPriceHistory(
                             productId = productId,
@@ -340,18 +346,28 @@ class ProductRepository(
                             autoSaved = record.autoSaved
                         )
                     )
+                    productKeys.add(record.recordedAt to record.deviceId)
                     insertedCount++
                     touchedProductIds += productId
                 }
             }
         }
 
-        // 合并后刷新受影响商品：priceCents 跟随最新一条记录，updatedAt 取最大
-        touchedProductIds.forEach { productId ->
-            val history = dao.getAllHistoryOnce().filter { it.productId == productId }
-            val newest = history.maxByOrNull { it.recordedAt } ?: return@forEach
-            dao.getProductById(productId)?.let { product ->
-                dao.update(product.copy(priceCents = newest.priceCents, updatedAt = newest.recordedAt))
+        // 合并后刷新受影响商品：priceCents 跟随最新一条记录，updatedAt 取最大。
+        // 全量历史只查一次在内存里归组，替代逐商品 getAllHistoryOnce 全表扫描
+        if (touchedProductIds.isNotEmpty()) {
+            val newestByProduct = HashMap<Long, ProductPriceHistory>()
+            dao.getAllHistoryOnce().forEach { h ->
+                if (h.productId in touchedProductIds) {
+                    val cur = newestByProduct[h.productId]
+                    if (cur == null || h.recordedAt > cur.recordedAt) newestByProduct[h.productId] = h
+                }
+            }
+            touchedProductIds.forEach { productId ->
+                val newest = newestByProduct[productId] ?: return@forEach
+                dao.getProductById(productId)?.let { product ->
+                    dao.update(product.copy(priceCents = newest.priceCents, updatedAt = newest.recordedAt))
+                }
             }
         }
 

@@ -96,7 +96,7 @@ class ScreenCaptureService : Service() {
             val result = ocrInteractor.captureOnce(
                 bitmapProvider = { controller.acquireBitmap() },
                 onScreenshot = if (screenshotStore.isEnabled()) {
-                    { bitmap -> screenshotStore.savePending(bitmap) }
+                    { bitmap, crop -> screenshotStore.savePending(bitmap, crop) }
                 } else null
             )
 

@@ -61,6 +61,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
@@ -107,6 +109,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -305,6 +308,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
         if (ScreenCaptureService.isRunning) {
             captureStarted = true
         }
+        // 存量截图补生成卡片商品图（后台一次，已有 t 图跳过）
+        viewModel.backfillThumbs()
     }
 
     pendingDelete?.let { item ->
@@ -368,7 +373,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
             val radiusPx = with(compareDensity) { CompareMenuRadius.toPx() }
             compareMenu = CompareMenuState(
                 center = compareCenterClamped(pos, rootSize, radiusPx),
-                apps = compareApps
+                apps = compareApps,
+                title = item.title
             )
         },
         onDrag = { pos ->
@@ -395,7 +401,7 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
             val sel = st?.selection
             if (st != null && sel != null && sel < st.apps.size) {
                 val app = st.apps[sel]
-                if (!CompareApps.launch(context, app.packageName)) {
+                if (!CompareApps.launch(context, app.packageName, query = st.title)) {
                     Toast.makeText(context, "无法打开「${app.label}」", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -1411,6 +1417,22 @@ private fun SettingsDialog(
                             }
                         )
                     }
+                    GroupDivider()
+                    // 跳转直达搜索：双击球/径向菜单跳比价应用时带商品名直达其搜索结果页，
+                    // 省去手动粘贴搜索；已适配应用走 deeplink（淘宝/京东/拼多多），
+                    // 闲鱼走分享文本搜索（ACTION_SEND 同样直达结果页）
+                    GroupRow {
+                        var directSearch by remember { mutableStateOf(CompareApps.isDirectSearch(context)) }
+                        SettingsRow(
+                            title = "跳转直达搜索",
+                            subtitle = "跳比价应用时带商品名直达搜索结果页；闲鱼也支持，无需手动粘贴",
+                            checked = directSearch,
+                            onChange = { enabled ->
+                                CompareApps.setDirectSearch(context, enabled)
+                                directSearch = enabled
+                            }
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
                 SettingsGroup {
@@ -1578,20 +1600,22 @@ private fun SettingsRow(
     }
 }
 
-// 截图全屏查看：黑底沉浸，点任意处关闭，底部半透明信息条带时间与价格
+// 截图全屏查看：黑底沉浸，左右滑动翻该商品所有存档截图（价格史回放），
+// 顶部信息条标注当前页的日期与价格（越全史最低价染绿），点任意处关闭
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ScreenshotViewer(
     screenshotStore: ScreenshotStore,
-    record: ProductPriceHistory,
+    records: List<ProductPriceHistory>,
+    initialIndex: Int,
+    productMinPrice: Long,
     onDismiss: () -> Unit
 ) {
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, record.id) {
-            value = withContext(Dispatchers.IO) { screenshotStore.decodeSampled(record.id, 1280) }
-        }
+        val pagerState = rememberPagerState(initialPage = initialIndex) { records.size }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -1603,34 +1627,52 @@ private fun ScreenshotViewer(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            bitmap?.let { bmp ->
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                val record = records[page]
+                val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, record.id) {
+                    value = withContext(Dispatchers.IO) { screenshotStore.decodeSampled(record.id, 1280) }
+                }
+                bitmap?.let { bmp ->
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
+            val current = records[pagerState.currentPage]
             Row(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
+                    .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .background(Color(0x66000000))
                     .padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = formatTime(record.recordedAt),
+                    text = formatTime(current.recordedAt),
                     color = Color.White,
                     style = MaterialTheme.typography.labelMedium
                 )
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = formatPrice(record.priceCents),
-                    color = Color.White,
+                    text = formatPrice(current.priceCents),
+                    color = if (current.priceCents == productMinPrice) FreshGreen else Color.White,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
+                Spacer(modifier = Modifier.weight(1f))
+                if (records.size > 1) {
+                    Text(
+                        text = "${pagerState.currentPage + 1}/${records.size}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
             }
         }
     }
@@ -1978,11 +2020,19 @@ private fun ProductCard(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+    // 商品图：每商品独立缓存位图，列表滚动/卡片开合不重复解码磁盘
+    var thumb by remember(item.id) { mutableStateOf<ImageBitmap?>(null) }
+    // 点商品图打开的截图回放：落点是「有截图记录里最便宜的那条」
+    var viewingShot by remember { mutableStateOf<ProductPriceHistory?>(null) }
     // 径向菜单控制器：pointerInput(Unit) 的手势协程不会随重组重启，用最新引用接住
     val currentCompare by rememberUpdatedState(compare)
     // 手势上报 root 坐标的锚点：pointerInput 局部坐标 + 本节点在 root 中的位置
     var headerPosInRoot by remember { mutableStateOf(Offset.Zero) }
     val history by viewModel.historyFor(item.id).collectAsState()
+    // 截图存档存在性（IO 线程一次目录列举），给点图回放挑最便宜截图用
+    val shotIds by produceState<Set<Long>>(emptySet(), viewModel.screenshotStore, history) {
+        value = viewModel.screenshotStore.existingShotIds()
+    }
     val minPrice = history.minOfOrNull { it.priceCents } ?: item.priceCents
     val isAtLowest = item.priceCents <= minPrice
     val previousPrice = if (history.size >= 2) history[history.lastIndex - 1].priceCents else null
@@ -2016,8 +2066,9 @@ private fun ProductCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-            // 只有头部（标题 + 价格）可点击展开/收起，详情区与折线图不再响应收起
-            Column(
+            // 头部行：左侧商品图（有缩略图时显示）+ 右侧标题价格列。
+            // 只有头部可点击展开/收起，详情区与折线图不再响应收起
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { headerPosInRoot = it.positionInRoot() }
@@ -2066,6 +2117,40 @@ private fun ProductCard(
                         } else Modifier
                     )
             ) {
+                // 商品图：取最新一条历史记录的缩略图（该商品最近一次识别的商品图区域），
+                // 异步解码，期间显示浅灰占位；thumbsVersion 变化时重新检查磁盘
+                val thumbsVersion by viewModel.thumbsVersion.collectAsState()
+                val latestHistoryId = remember(item.id, history) { history.lastOrNull()?.id }
+                // 磁盘存在性检查走 IO：File.exists 是磁盘 stat，原先在组合阶段同步执行，
+                // 列表滚动时每张可见卡片都来一次主线程 I/O
+                val hasThumb by produceState(false, latestHistoryId, thumbsVersion) {
+                    val id = latestHistoryId ?: return@produceState
+                    value = withContext(Dispatchers.IO) {
+                        viewModel.screenshotStore.hasThumb(id)
+                    }
+                }
+                if (latestHistoryId != null && hasThumb) {
+                    LaunchedEffect(latestHistoryId) {
+                        thumb = withContext(Dispatchers.IO) {
+                            viewModel.screenshotStore.decodeThumb(latestHistoryId)
+                        }?.asImageBitmap()
+                    }
+                    // 点商品图 → 截图回放，直接落在最便宜那天的页面：
+                    // 取有截图的记录里价格最低的一条（并列取最早）；目录列举未就绪时
+                    // 退回最新一条（缩略图能显示说明它必有存档）
+                    ProductThumb(
+                        image = thumb,
+                        thumbSize = 72.dp,
+                        onClick = {
+                            val target = history.filter { it.id in shotIds }
+                                .minByOrNull { it.priceCents }
+                                ?: history.lastOrNull()
+                            if (target != null) viewingShot = target
+                        }
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
+                Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = item.title,
                 style = MaterialTheme.typography.bodyLarge,
@@ -2163,6 +2248,7 @@ private fun ProductCard(
                     drawPath(path, chevronColor, style = stroke)
                 }
             }
+                }
             }
 
             if (expanded) {
@@ -2179,6 +2265,20 @@ private fun ProductCard(
             }
         }
     }
+
+    // 商品图打开的截图回放：滑的范围是该商品全部有截图的记录
+    viewingShot?.let { rec ->
+        val shotRecords = remember(history, shotIds) {
+            history.filter { it.id in shotIds }.ifEmpty { listOf(rec) }
+        }
+        ScreenshotViewer(
+            screenshotStore = viewModel.screenshotStore,
+            records = shotRecords,
+            initialIndex = shotRecords.indexOfFirst { it.id == rec.id }.coerceAtLeast(0),
+            productMinPrice = minPrice,
+            onDismiss = { viewingShot = null }
+        )
+    }
 }
 
 // ==================== 长按比价径向菜单 ====================
@@ -2189,7 +2289,8 @@ private val CompareMenuHitRadius = 42.dp
 
 private class CompareMenuState(
     val center: Offset,
-    val apps: List<CompareApp>
+    val apps: List<CompareApp>,
+    val title: String
 ) {
     var selection by mutableStateOf<Int?>(null)
 }
@@ -2684,6 +2785,51 @@ private fun MoveButton(symbol: String, enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
+// 商品图缩略图：72dp 圆角方图，加载前浅灰占位；点按等同点头部（展开/收起）
+@Composable
+private fun ProductThumb(
+    image: ImageBitmap?,
+    thumbSize: androidx.compose.ui.unit.Dp,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(thumbSize)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFFF2F3F5))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (image != null) {
+            Image(
+                bitmap = image,
+                contentDescription = "商品图",
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            // 解码中的占位：细线图片轮廓，克制不花哨
+            Canvas(modifier = Modifier.size(22.dp)) {
+                drawRoundRect(
+                    color = Color(0xFFD8D8DE),
+                    cornerRadius = CornerRadius(3.dp.toPx()),
+                    style = Stroke(width = 1.4.dp.toPx())
+                )
+                drawLine(
+                    color = Color(0xFFD8D8DE),
+                    start = Offset(size.width * 0.3f, size.height * 0.35f),
+                    end = Offset(size.width * 0.7f, size.height * 0.35f),
+                    strokeWidth = 1.4.dp.toPx()
+                )
+                drawCircle(color = Color(0xFFD8D8DE), radius = 2.dp.toPx(), center = Offset(size.width * 0.5f, size.height * 0.65f))
+            }
+        }
+    }
+}
+
 @Composable
 private fun LowestBadge() {
     // 圆点脉动：强调"现在就是最低"这个关键信号
@@ -2980,11 +3126,16 @@ private fun ProductHistoryDetail(
     }
 
     viewingShot?.let { record ->
-        ScreenshotViewer(
-            screenshotStore = screenshotStore,
-            record = record,
-            onDismiss = { viewingShot = null }
-        )
+        val shotRecords = history.filter { it.id in shotIds }
+        if (shotRecords.isNotEmpty()) {
+            ScreenshotViewer(
+                screenshotStore = screenshotStore,
+                records = shotRecords,
+                initialIndex = shotRecords.indexOfFirst { it.id == record.id }.coerceAtLeast(0),
+                productMinPrice = minPrice,
+                onDismiss = { viewingShot = null }
+            )
+        }
     }
 
     pendingDelete?.let { record ->
@@ -3044,12 +3195,26 @@ private fun PriceLineChart(
                 )
             )
         }
-    val chartPrices = if (history.isEmpty()) listOf(fallbackPrice) else history.map { it.priceCents }
+    // remember 保证同一 history 下列表引用稳定：ChartGeometry 的缓存 key 是引用比较，
+    // 不包住的话每次重组都新建列表，重组帧全部 miss（只有动画/scrub 帧命中）
+    val chartPrices = remember(history, fallbackPrice) {
+        if (history.isEmpty()) listOf(fallbackPrice) else history.map { it.priceCents }
+    }
     val minPrice = chartPrices.minOrNull() ?: fallbackPrice
     val maxPrice = chartPrices.maxOrNull() ?: fallbackPrice
     val minIndex = chartPrices.indexOf(minPrice).coerceAtLeast(0)
     val lastIndex = chartPrices.lastIndex
     val flat = history.size > 1 && minPrice == maxPrice
+
+    // 几何缓存 + 帧间不变对象（虚线 PathEffect / 面积渐变）：reveal 动画与 scrub 重绘帧全部复用
+    val geom = remember { ChartGeometry() }
+    val density = LocalDensity.current
+    val dashEffect = remember(density) {
+        with(density) { PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 5.dp.toPx())) }
+    }
+    val areaBrush = remember {
+        Brush.verticalGradient(0.0f to Color(0x1233333D), 1f to Color(0x0033333D))
+    }
 
     var revealed by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { revealed = true }
@@ -3147,25 +3312,33 @@ private fun PriceLineChart(
             val range = (maxPrice - minPrice).takeIf { it > 0 } ?: 1L
             val midY = (top + bottom) / 2f
 
-            val points = chartPrices.mapIndexed { index, price ->
-                val x = if (chartPrices.size == 1) {
-                    left
-                } else {
-                    left + width * index / (chartPrices.lastIndex).coerceAtLeast(1)
-                }
-                // 价格全平时落在中线（最低参考线上），单点也居中——避免点贴底显得坠落
-                val y = if (flat || chartPrices.size == 1) {
-                    midY
-                } else {
-                    bottom - height * ((price - minPrice).toFloat() / range.toFloat())
-                }
-                Offset(x, y)
+            // 几何只在（数据, 画布尺寸）变化时重算：动画/scrub 的重绘帧直接复用缓存
+            if (geom.needsRebuild(chartPrices, size.width, size.height)) {
+                geom.rebuild(
+                    chartPrices, size.width, size.height,
+                    chartPrices.mapIndexed { index, price ->
+                        val x = if (chartPrices.size == 1) {
+                            left
+                        } else {
+                            left + width * index / (chartPrices.lastIndex).coerceAtLeast(1)
+                        }
+                        // 价格全平时落在中线（最低参考线上），单点也居中——避免点贴底显得坠落
+                        val y = if (flat || chartPrices.size == 1) {
+                            midY
+                        } else {
+                            bottom - height * ((price - minPrice).toFloat() / range.toFloat())
+                        }
+                        Offset(x, y)
+                    },
+                    left, right, bottom
+                )
             }
+            val points = geom.points
 
             // ---- 骨架：最高/最低虚线参考线 + 右侧价签。参考线是裸 sparkline 缺的"骨"，
             // 让眼睛有锚点；最低线染绿，与价签同色呼应"值得买"信号。
             // 选中价恰为最高/最低（或全平）时不另弹浮动价签，直接把右轴已有价签强化成实色胶囊 ----
-            val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 5.dp.toPx()))
+            val dash = dashEffect
             fun drawRefLine(y: Float, color: Color) {
                 drawLine(
                     color = color,
@@ -3218,12 +3391,7 @@ private fun PriceLineChart(
                 // 单点构图：红点锚在左端起点，价格水平虚线向右渐隐——
                 // "走势还没发生，但方向已就绪"；右轴挂墨色价签收住构图
                 drawLine(
-                    brush = Brush.horizontalGradient(
-                        0f to ChartInk.copy(alpha = 0.42f),
-                        1f to ChartInk.copy(alpha = 0.08f),
-                        startX = left,
-                        endX = right
-                    ),
+                    brush = geom.tailBrush,
                     start = Offset(left, midY),
                     end = Offset(right, midY),
                     strokeWidth = 1.dp.toPx(),
@@ -3234,30 +3402,15 @@ private fun PriceLineChart(
 
             // ---- 数据：直角折线 + 极淡面积，随动画从左向右揭开。
             // 线用「旧淡新浓」的墨色渐变，视线被自然引向"现在的价格" ----
-            val linePath = buildLinePath(points)
             clipRect(right = left + width * progress + 12.dp.toPx()) {
                 if (points.size > 1) {
-                    val areaPath = Path().apply {
-                        addPath(linePath)
-                        lineTo(points.last().x, bottom)
-                        lineTo(points.first().x, bottom)
-                        close()
-                    }
                     drawPath(
-                        path = areaPath,
-                        brush = Brush.verticalGradient(
-                            0.0f to Color(0x1233333D),
-                            1f to Color(0x0033333D)
-                        )
+                        path = geom.areaPath,
+                        brush = areaBrush
                     )
                     drawPath(
-                        path = linePath,
-                        brush = Brush.horizontalGradient(
-                            0f to Color(0xFFB9BBC4),
-                            1f to ChartInk,
-                            startX = left,
-                            endX = right
-                        ),
+                        path = geom.linePath,
+                        brush = geom.lineBrush,
                         style = Stroke(
                             width = 2.dp.toPx(),
                             cap = StrokeCap.Round,
@@ -3351,15 +3504,69 @@ private fun PriceLineChart(
     }
 }
 
+// 行情图几何缓存：reveal 动画 900ms 内每帧重绘、scrub 手势每帧跟随，原先每帧重建
+// points 列表 + 两条 Path + 渐变 Brush；几何只随（数据引用, 画布尺寸）变化，命中后动画帧零重建
+private class ChartGeometry {
+    private var keyPrices: List<Long>? = null
+    private var keyW = -1f
+    private var keyH = -1f
+    var points: List<Offset> = emptyList()
+        private set
+    val linePath = Path()
+    val areaPath = Path()
+    // 首帧 draw 必先走 rebuild（keyW 初值 -1 必失配），使用点在 rebuild 之后
+    lateinit var lineBrush: Brush
+        private set
+    lateinit var tailBrush: Brush
+        private set
+
+    fun needsRebuild(prices: List<Long>, w: Float, h: Float): Boolean =
+        keyPrices !== prices || keyW != w || keyH != h
+
+    fun rebuild(
+        prices: List<Long>,
+        w: Float,
+        h: Float,
+        points: List<Offset>,
+        left: Float,
+        right: Float,
+        bottom: Float
+    ) {
+        keyPrices = prices
+        keyW = w
+        keyH = h
+        this.points = points
+        buildLinePath(linePath, points)
+        areaPath.reset()
+        if (points.size > 1) {
+            areaPath.addPath(linePath)
+            areaPath.lineTo(points.last().x, bottom)
+            areaPath.lineTo(points.first().x, bottom)
+            areaPath.close()
+        }
+        lineBrush = Brush.horizontalGradient(
+            0f to Color(0xFFB9BBC4),
+            1f to ChartInk,
+            startX = left,
+            endX = right
+        )
+        tailBrush = Brush.horizontalGradient(
+            0f to ChartInk.copy(alpha = 0.42f),
+            1f to ChartInk.copy(alpha = 0.08f),
+            startX = left,
+            endX = right
+        )
+    }
+}
+
 // 直角折线：相邻数据点用直线连接，转折处加圆角，直观不花哨
-private fun buildLinePath(points: List<Offset>): Path {
-    val path = Path()
-    if (points.isEmpty()) return path
+private fun buildLinePath(path: Path, points: List<Offset>) {
+    path.reset()
+    if (points.isEmpty()) return
     path.moveTo(points.first().x, points.first().y)
     for (i in 1 until points.size) {
         path.lineTo(points[i].x, points[i].y)
     }
-    return path
 }
 
 private fun formatPrice(cents: Long): String =

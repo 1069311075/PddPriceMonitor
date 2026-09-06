@@ -35,6 +35,18 @@ class MainViewModel @Inject constructor(
         _saveScreenshots.value = enabled
     }
 
+    // 存量归档截图补生成卡片缩略图：App 打开后台跑一次（固定比例带裁剪），已有 t 图的跳过；
+    // 生成后 bump 版本号，让卡片重新检查 hasThumb（否则新生成的缩略图要等下次重组才出现）
+    private val _thumbsVersion = MutableStateFlow(0)
+    val thumbsVersion: StateFlow<Int> = _thumbsVersion
+
+    fun backfillThumbs() {
+        viewModelScope.launch {
+            screenshotStore.backfillThumbs()
+            _thumbsVersion.value += 1
+        }
+    }
+
     val syncState: StateFlow<SyncState> = sync.state
 
     val lastSyncAt: StateFlow<Long?> = sync.lastSyncAt

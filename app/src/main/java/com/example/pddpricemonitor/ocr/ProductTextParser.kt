@@ -112,6 +112,87 @@ class ProductTextParser {
             "\\u65B0\\u6B3E|\\u70ED\\u5356|\\u9886\\u5238|\\u987A\\u4E30\\u5305\\u90AE)"
     )
 
+    // ---- 热路径正则：原先散在各函数体内每次调用重新编译（每行 OCR 文本要过几十遍），
+    // 提升为字段只编译一次；模式与原实现逐字节一致，解析行为不变 ----
+    private val specOrPackageRegex = Regex(
+        "(\\d+\\s*(g|kg|ml|l|\\u514B|\\u6BEB\\u5347|\\u5347|\\u679A|\\u888B|\\u74F6)|\\u88C5|\\u888B\\u88C5|\\u74F6\\u88C5)",
+        RegexOption.IGNORE_CASE
+    )
+    private val bareNumberRegex = Regex("\\d{1,6}(?:[.,]\\d{1,2})?")
+    private val percentGuaranteeRegex = Regex("\\d+\\s*%|100%|\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD")
+    private val bottomPriceHintRegex = Regex(
+        "(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|" +
+            "\\u5373\\u5C06\\u5356\\u5B8C|\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355|" +
+            "\\u8865\\u8D34|\\u9996\\u4EF6)"
+    )
+    private val yuanZeroDecimalRegex = Regex("[\\u00A5\\uFFE5]\\s*0[.,]\\d{1,2}")
+    private val percentTimeRegex = Regex("\\d+\\s*%|100%|\\d{1,2}:\\d{2}|618")
+    private val personCountRegex = Regex("(\\u4EBA|\\u4EF6|\\u5DF2\\u552E|\\u9500\\u91CF|\\u5269\\u4F59|\\u5012\\u8BA1\\u65F6)")
+    private val forbiddenContextRegex = Regex(
+        "\\d+\\s*%|100%|618|\\u767E\\u4EBF\\u8865\\u8D34|\\u4F18\\u60E0|" +
+            "\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD|\\u70ED\\u5356|\\u8BC4\\u4EF7"
+    )
+    private val explicitBottomPriceRegex = Regex(
+        "(\\u5238\\u540E|\\u9650\\u65F6|\\u9650\\u91CF\\u4EF7|\\u79D2\\u6740\\u4EF7|" +
+            "\\u6700\\u540E\\d*\\u5206\\u949F|\\u53D1\\u8D77\\u62FC\\u5355|" +
+            "\\u7ACB\\u5373\\u62FC\\u5355|\\u60CA\\u559C\\u7279\\u4EF7|\\u9996\\u4EF6)"
+    )
+    private val smallDecimalRegex = Regex("\\d{1,4}[.,]\\d{1,2}")
+    private val bottomCouponBoostRegex = Regex("(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|\\u53D1\\u8D77\\u62FC\\u5355)")
+    private val bottomFirstItemRegex = Regex("(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|\\u9996\\u4EF6)")
+    private val groupBuyRegex = Regex("(\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355)")
+    private val timeClockRegex = Regex("\\d{1,2}:\\d{2}:\\d{2}")
+    private val shopGuaranteeRegex = Regex(
+        "(\\u6765\\u81EA|\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
+            "100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|\\u4EBA\\u5728\\u62FC|" +
+            "\\u4EBA\\u5728\\u62A2\\u4F18\\u60E0|\\u7ACB\\u5373\\u62FC\\u5355)"
+    )
+    private val shopBadgeNegativeRegex = Regex(
+        "(\\u6765\\u81EA|100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|" +
+            "\\u5E97\\u94FA\\u4FDD\\u969C|\\u8BE5\\u54C1\\u724C|\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C)"
+    )
+    private val shopBadgeRegex = Regex(
+        "(\\u5B98\\u65B9\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
+            "\\u65D7\\u8230\\u5E97|\\u65D7\\u8230|\\u4E13\\u5356\\u5E97|\\u4E13\\u8425\\u5E97)"
+    )
+    private val productSignalRegex = Regex(
+        "(\\d+(?:\\.\\d+)?\\s*(g|kg|ml|l|\\u514B|\\u6BEB\\u5347|\\u5347|\\u53EA|" +
+            "\\u74F6|\\u888B|\\u76D2|\\u5305|\\u65A4|\\u7247|\\u679A)|" +
+            "\\u4E70\\d+\\u9001|\\u96F6\\u98DF|\\u98DF\\u54C1|\\u6D17\\u5242|" +
+            "\\u725B\\u8089|\\u9762|\\u996D|\\u6C41|\\u996E\\u54C1|\\u8336\\u70B9|" +
+            "\\u5305\\u88C5|\\u9178\\u5976|\\u5E03\\u4E01|\\u5364|\\u70E7\\u70E4|" +
+            "\\u6D77\\u82D4|\\u96EA\\u997C)",
+        RegexOption.IGNORE_CASE
+    )
+    private val dayWithinStripRegex = Regex("\\S*天内\\S*")
+    private val collectionPrefixRegex = Regex(
+        "^\\s*(618\\s*)?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u6536\\u85CF\\s*[|\\uFF5C]?\\s*"
+    )
+    private val badgeCountPrefixRegex = Regex(
+        "^[\\s\\S]{0,10}?(?:\\u767E\\u4EBF|\\u5343\\u4EBF|\\u54C1\\u724C|\\u5B98\\u65B9|\\u65D7\\u8230|\\u4E13\\u8425|\\u4E13\\u5356|\\u79D2\\u6740|618)[\\s\\S]{0,12}?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?(?:\\u4EBA\\u6536\\u85CF|\\u4EBA\\u56DE\\u8D2D\\u8BE5\\u54C1\\u724C)\\s*[|\\uFF5C]?\\s*"
+    )
+    private val badgeHotSalePrefixRegex = Regex(
+        "^[\\s\\S]{0,10}?(?:\\u767E\\u4EBF|\\u5343\\u4EBF|\\u54C1\\u724C|\\u5B98\\u65B9|\\u65D7\\u8230|\\u4E13\\u8425|\\u4E13\\u5356|\\u79D2\\u6740|618)[\\s\\S]{0,8}?(?:\\u7D2F\\u8BA1)?(?:\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6|\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761)\\s*[|\\uFF5C]?\\s*"
+    )
+    private val brandGoodReviewRegex = Regex(
+        "\\u54C1\\u724C\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761\\s*[|\\uFF5C]?"
+    )
+    private val brandHotSaleRegex = Regex(
+        "\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6"
+    )
+    private val buybackCountRegex = Regex(
+        "\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u56DE\\u8D2D\\u8BE5\\u54C1\\u724C"
+    )
+    private val badgeVariantBrandRegex = Regex(
+        "^\\s*\\u767E[\\u8D34\\u4EBF\\u8865\\u5C0FEe\\u59160-9]{0,4}\\s*\\u54C1\\u724C\\s*[|\\uFF5C]?\\s*"
+    )
+    private val serviceWordStripRegex = Regex(
+        "(\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|\\u964D\\u4EF7\\u8865\\u5DEE|\\u6B63\\u54C1\\u53D1\\u7968|\\u987A\\u4E30\\u5305\\u90AE|\\u540E\\u5929\\u8FBE|24\\u5C0F\\u65F6\\u53D1\\u8D27|\\u4E70\\u8D35\\u53CC\\u500D\\u8D54)"
+    )
+    private val bracketStripRegex = Regex("[\\[\\]{}()\\uFF08\\uFF09|]+")
+    private val whitespaceRegex = Regex("\\s+")
+    private val compactTitleRegex = Regex("[^\\p{IsHan}a-z0-9]+")
+
     fun parse(text: Text, bitmap: Bitmap? = null): List<DetectedProduct> {
         val result = parseWithReason(text, bitmap)
         return result.products
@@ -289,8 +370,7 @@ class ProductTextParser {
         val hasBrandOrSpec =
             titleStartRegex.containsMatchIn(cleaned) ||
                 cleaned.contains('\u3010') ||
-                Regex("(\\d+\\s*(g|kg|ml|l|\\u514B|\\u6BEB\\u5347|\\u5347|\\u679A|\\u888B|\\u74F6)|\\u88C5|\\u888B\\u88C5|\\u74F6\\u88C5)", RegexOption.IGNORE_CASE)
-                    .containsMatchIn(cleaned)
+                specOrPackageRegex.containsMatchIn(cleaned)
         val hasEnoughWords = normalized.length >= 16
         return hasBrandOrSpec || hasEnoughWords
     }
@@ -371,7 +451,7 @@ class ProductTextParser {
 
         val candidates = bottomLines.flatMap { line ->
             line.elements.flatMap { element ->
-                Regex("\\d{1,6}(?:[.,]\\d{1,2})?").findAll(element.text).mapNotNull { match ->
+                bareNumberRegex.findAll(element.text).mapNotNull { match ->
                     val text = match.value
                     if (isForbiddenBottomNumber(text, element.text, line.text)) return@mapNotNull null
                     BottomNumber(line, text, element.rect)
@@ -404,18 +484,13 @@ class ProductTextParser {
         extractPriceCents(line)?.let { return it }
         extractPriceCentsFromElements(line)?.let { return it }
         val text = line.text
-        if (Regex("\\d+\\s*%|100%|\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD").containsMatchIn(text)) {
+        if (percentGuaranteeRegex.containsMatchIn(text)) {
             return null
         }
-        if (!Regex(
-                "(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|" +
-                    "\\u5373\\u5C06\\u5356\\u5B8C|\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355|" +
-                    "\\u8865\\u8D34|\\u9996\\u4EF6)"
-            ).containsMatchIn(text)
-        ) {
+        if (!bottomPriceHintRegex.containsMatchIn(text)) {
             return null
         }
-        return Regex("\\d{1,6}(?:[.,]\\d{1,2})?")
+        return bareNumberRegex
             .findAll(text)
             .mapNotNull { parseBottomPriceText(text, it.value) }
             .filter { it in 1..999_999_00 }
@@ -448,7 +523,7 @@ class ProductTextParser {
     }
 
     private fun parsePlainPriceText(text: String): Long? {
-        val match = Regex("\\d{1,6}(?:[.,]\\d{1,2})?").find(text) ?: return null
+        val match = bareNumberRegex.find(text) ?: return null
         val parts = match.value.split('.', ',', limit = 2)
         val yuan = parts.getOrNull(0)?.toLongOrNull() ?: return null
         val cents = parts.getOrNull(1).orEmpty().padEnd(2, '0').take(2).toLongOrNull() ?: 0L
@@ -458,11 +533,11 @@ class ProductTextParser {
     private fun isForbiddenBottomNumber(text: String, elementText: String, lineText: String): Boolean {
         val yuan = text.substringBefore('.').substringBefore(',').toLongOrNull() ?: return true
         if (yuan == 100L || yuan == 618L) return true
-        if (!text.contains('.') && !text.contains(',') && Regex("[\\u00A5\\uFFE5]\\s*0[.,]\\d{1,2}").containsMatchIn(lineText)) return true
-        if (Regex("\\d+\\s*%|100%|\\d{1,2}:\\d{2}|618").containsMatchIn(elementText)) return true
+        if (!text.contains('.') && !text.contains(',') && yuanZeroDecimalRegex.containsMatchIn(lineText)) return true
+        if (percentTimeRegex.containsMatchIn(elementText)) return true
         if (isForbiddenBottomNumberContext(lineText) && !isExplicitBottomPriceLine(lineText)) return true
         if (
-            Regex("(\\u4EBA|\\u4EF6|\\u5DF2\\u552E|\\u9500\\u91CF|\\u5269\\u4F59|\\u5012\\u8BA1\\u65F6)").containsMatchIn(lineText) &&
+            personCountRegex.containsMatchIn(lineText) &&
             !isExplicitBottomPriceLine(lineText)
         ) {
             return true
@@ -471,23 +546,16 @@ class ProductTextParser {
     }
 
     private fun isForbiddenBottomNumberContext(text: String): Boolean =
-        Regex(
-            "\\d+\\s*%|100%|618|\\u767E\\u4EBF\\u8865\\u8D34|\\u4F18\\u60E0|" +
-                "\\u6B63\\u54C1|\\u4FDD\\u969C|\\u627F\\u4FDD|\\u70ED\\u5356|\\u8BC4\\u4EF7"
-        ).containsMatchIn(text)
+        forbiddenContextRegex.containsMatchIn(text)
 
     private fun isForbiddenBottomPriceLine(text: String): Boolean =
         isForbiddenBottomNumberContext(text) && !isExplicitBottomPriceLine(text)
 
     private fun isExplicitBottomPriceLine(text: String): Boolean =
-        Regex(
-            "(\\u5238\\u540E|\\u9650\\u65F6|\\u9650\\u91CF\\u4EF7|\\u79D2\\u6740\\u4EF7|" +
-                "\\u6700\\u540E\\d*\\u5206\\u949F|\\u53D1\\u8D77\\u62FC\\u5355|" +
-                "\\u7ACB\\u5373\\u62FC\\u5355|\\u60CA\\u559C\\u7279\\u4EF7|\\u9996\\u4EF6)"
-        ).containsMatchIn(text) &&
+        explicitBottomPriceRegex.containsMatchIn(text) &&
             (
                 text.any { it == '\u00A5' || it == '\uFFE5' } ||
-                    Regex("\\d{1,4}[.,]\\d{1,2}").containsMatchIn(text)
+                    smallDecimalRegex.containsMatchIn(text)
                 )
 
     private fun bottomNumberScore(number: BottomNumber): Int {
@@ -496,7 +564,7 @@ class ProductTextParser {
         score += number.rect.height().coerceAtMost(90)
         score += number.rect.width().coerceAtMost(220) / 3
         score += number.rect.bottom / 18
-        if (Regex("(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|\\u53D1\\u8D77\\u62FC\\u5355)").containsMatchIn(number.line.text)) {
+        if (bottomCouponBoostRegex.containsMatchIn(number.line.text)) {
             score += 40
         }
         if (number.text.substringBefore('.').substringBefore(',').length >= 2) score += 20
@@ -506,13 +574,13 @@ class ProductTextParser {
     private fun bottomPriceLineScore(line: OcrLine): Int {
         var score = 0
         if (line.text.any { it == '\u00A5' || it == '\uFFE5' }) score += 140
-        if (Regex("(\\u5238\\u540E|\\u9650\\u65F6|\\u60CA\\u559C\\u7279\\u4EF7|\\u9996\\u4EF6)").containsMatchIn(line.text)) score += 50
-        if (Regex("(\\u53D1\\u8D77\\u62FC\\u5355|\\u7ACB\\u5373\\u62FC\\u5355)").containsMatchIn(line.text)) score += 35
+        if (bottomFirstItemRegex.containsMatchIn(line.text)) score += 50
+        if (groupBuyRegex.containsMatchIn(line.text)) score += 35
         score += priceTextHeight(line).coerceAtMost(90)
         score += (line.rect.bottom / 20)
         score += (line.rect.width() / 80)
         if (isForbiddenBottomPriceLine(line.text)) score -= 220
-        if (Regex("\\d{1,2}:\\d{2}:\\d{2}").containsMatchIn(line.text)) score -= 80
+        if (timeClockRegex.containsMatchIn(line.text)) score -= 80
         return score
     }
 
@@ -642,39 +710,18 @@ class ProductTextParser {
 
     private fun isShopOrGuaranteeLine(text: String): Boolean =
         !isTitleLineWithShopBadge(text) &&
-            Regex(
-                "(\\u6765\\u81EA|\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
-                    "100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|\\u4EBA\\u5728\\u62FC|" +
-                    "\\u4EBA\\u5728\\u62A2\\u4F18\\u60E0|\\u7ACB\\u5373\\u62FC\\u5355)"
-            ).containsMatchIn(text)
+            shopGuaranteeRegex.containsMatchIn(text)
 
     private fun isTitleLineWithShopBadge(text: String): Boolean {
-        if (
-            Regex(
-                "(\\u6765\\u81EA|100%\\u6B63\\u54C1|\\u6B63\\u54C1\\u9669|" +
-                    "\\u5E97\\u94FA\\u4FDD\\u969C|\\u8BE5\\u54C1\\u724C|\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C)"
-            ).containsMatchIn(text)
-        ) {
+        if (shopBadgeNegativeRegex.containsMatchIn(text)) {
             return false
         }
 
-        val hasShopBadge = Regex(
-            "(\\u5B98\\u65B9\\u65D7\\u8230\\u5E97|\\u5B98\\u65B9\\u65D7\\u8230|" +
-                "\\u65D7\\u8230\\u5E97|\\u65D7\\u8230|\\u4E13\\u5356\\u5E97|\\u4E13\\u8425\\u5E97)"
-        ).containsMatchIn(text)
-        if (!hasShopBadge) return false
+        if (!shopBadgeRegex.containsMatchIn(text)) return false
 
         val hasProductSignal =
             text.contains('\u3010') ||
-                Regex(
-                    "(\\d+(?:\\.\\d+)?\\s*(g|kg|ml|l|\\u514B|\\u6BEB\\u5347|\\u5347|\\u53EA|" +
-                        "\\u74F6|\\u888B|\\u76D2|\\u5305|\\u65A4|\\u7247|\\u679A)|" +
-                        "\\u4E70\\d+\\u9001|\\u96F6\\u98DF|\\u98DF\\u54C1|\\u6D17\\u5242|" +
-                        "\\u725B\\u8089|\\u9762|\\u996D|\\u6C41|\\u996E\\u54C1|\\u8336\\u70B9|" +
-                        "\\u5305\\u88C5|\\u9178\\u5976|\\u5E03\\u4E01|\\u5364|\\u70E7\\u70E4|" +
-                        "\\u6D77\\u82D4|\\u96EA\\u997C)",
-                    RegexOption.IGNORE_CASE
-                ).containsMatchIn(text)
+                productSignalRegex.containsMatchIn(text)
 
         return hasProductSignal && normalizeTitle(text).length >= 10
     }
@@ -1029,7 +1076,7 @@ class ProductTextParser {
 
     private fun isPureLogisticsLine(cleaned: String): Boolean {
         if (!cleaned.contains("\u5929\u5185")) return false
-        val remainder = cleaned.replace(Regex("\\S*\u5929\u5185\\S*"), " ")
+        val remainder = cleaned.replace(dayWithinStripRegex, " ")
         return normalizeTitle(remainder).length < 8
     }
 
@@ -1042,11 +1089,12 @@ class ProductTextParser {
     // 17 字 ≥8 被误判为"带售后的标题"，纯售后行反而胜出抢走真标题
     private val afterSalesWordRegex = Regex("(\u9000\u8D27|\u53D1\u8D27|\u4FDD\u969C|\u5BA2\u670D|\u597D\u8D27|\u54C1\u724C\u56DE\u5934|\u79D2\u9000|\u65E0\u7406\u7531|\u5305\u8D54)")
 
+    private val afterSalesPhraseRegex = Regex("[\\d\u4E00-\u9FFFa-zA-Z]{0,6}(${afterSalesWordRegex.pattern})[\u4E00-\u9FFF]{0,6}")
+
     private fun isPureAfterSalesLine(cleaned: String): Boolean {
-        val phraseRegex = Regex("[\\d\u4E00-\u9FFFa-zA-Z]{0,6}(${afterSalesWordRegex.pattern})[\u4E00-\u9FFF]{0,6}")
         var remainder = cleaned
         while (true) {
-            val next = remainder.replaceFirst(phraseRegex, " ")
+            val next = remainder.replaceFirst(afterSalesPhraseRegex, " ")
             if (next == remainder) break
             remainder = next
         }
@@ -1055,31 +1103,31 @@ class ProductTextParser {
 
     private fun cleanupTitleText(text: String): String =
         text.replace(priceRegex, " ")
-            .replace(Regex("^\\s*(618\\s*)?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u6536\\u85CF\\s*[|\\uFF5C]?\\s*"), " ")
+            .replace(collectionPrefixRegex, " ")
             // 徽章行与标题首行被 OCR 合并成一行时（如"百亿小贴品牌索尼1339人收藏|香港直邮 索尼PS4游"），
             // "百亿补贴"已被误读无法按字面匹配——锚定徽章关键词+计数后缀（N人收藏/N人回购该品牌）
             // 双重条件剥离：前缀必须含百亿/品牌/官方等徽章词，防止误伤标题中部营销文案里的同形短语
-            .replace(Regex("^[\\s\\S]{0,10}?(?:\\u767E\\u4EBF|\\u5343\\u4EBF|\\u54C1\\u724C|\\u5B98\\u65B9|\\u65D7\\u8230|\\u4E13\\u8425|\\u4E13\\u5356|\\u79D2\\u6740|618)[\\s\\S]{0,12}?\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?(?:\\u4EBA\\u6536\\u85CF|\\u4EBA\\u56DE\\u8D2D\\u8BE5\\u54C1\\u724C)\\s*[|\\uFF5C]?\\s*"), " ")
+            .replace(badgeCountPrefixRegex, " ")
             // 同族徽章变体：计数短语是"热销N万件/好评N条"（如"百贴品牌索尼百补品牌热销296.2万件|香港直"，
             // OCR 把"该品牌累计热销"误读成"百补品牌热销"）。PDD 徽章文案会轮换，同样的徽章关键词
             // 锚定剥到计数短语为止；"件/条"强制收尾，防止误伤"旗舰店 2024新款 20件装"这类规格文本
-            .replace(Regex("^[\\s\\S]{0,10}?(?:\\u767E\\u4EBF|\\u5343\\u4EBF|\\u54C1\\u724C|\\u5B98\\u65B9|\\u65D7\\u8230|\\u4E13\\u8425|\\u4E13\\u5356|\\u79D2\\u6740|618)[\\s\\S]{0,8}?(?:\\u7D2F\\u8BA1)?(?:\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6|\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761)\\s*[|\\uFF5C]?\\s*"), " ")
-            .replace(Regex("\\u54C1\\u724C\\u597D\\u8BC4\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u6761\\s*[|\\uFF5C]?"), " ")
-            .replace(Regex("\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500\\s*\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\+?\\u4EF6"), " ")
-            .replace(Regex("\\d+(?:\\.\\d+)?[\\u4E07\\u5343]?\\u4EBA\\u56DE\\u8D2D\\u8BE5\\u54C1\\u724C"), " ")
+            .replace(badgeHotSalePrefixRegex, " ")
+            .replace(brandGoodReviewRegex, " ")
+            .replace(brandHotSaleRegex, " ")
+            .replace(buybackCountRegex, " ")
             // 「百亿补贴 品牌」徽章被误读成「百E品牌/百贴品牌/百亿小贴品牌/百1贴品牌」等变体时：
             // 计数短语锚点规则失效（本变体无计数短语）、字面匹配也失效。中间字符限定为
             // 补贴误读字母表（贴亿补小Ee外+数字，亿会被读成1），不会吞掉「百果园品牌」真品牌文本
-            .replace(Regex("^\\s*\\u767E[\\u8D34\\u4EBF\\u8865\\u5C0FEe\\u59160-9]{0,4}\\s*\\u54C1\\u724C\\s*[|\\uFF5C]?\\s*"), " ")
-            .replace(Regex("(\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|\\u964D\\u4EF7\\u8865\\u5DEE|\\u6B63\\u54C1\\u53D1\\u7968|\\u987A\\u4E30\\u5305\\u90AE|\\u540E\\u5929\\u8FBE|24\\u5C0F\\u65F6\\u53D1\\u8D27|\\u4E70\\u8D35\\u53CC\\u500D\\u8D54)"), " ")
-            .replace(Regex("[\\[\\]{}()\\uFF08\\uFF09|]+"), " ")
-            .replace(Regex("\\s+"), " ")
+            .replace(badgeVariantBrandRegex, " ")
+            .replace(serviceWordStripRegex, " ")
+            .replace(bracketStripRegex, " ")
+            .replace(whitespaceRegex, " ")
             .trim()
 
     private fun normalizeDisplayTitle(text: String): String =
         text.substringFromBrandBracket()
             .replace(leadingTitleBadgeRegex, "")
-            .replace(Regex("\\s+"), " ")
+            .replace(whitespaceRegex, " ")
             .trim()
 
     private fun String.substringFromBrandBracket(): String {
@@ -1120,7 +1168,7 @@ class ProductTextParser {
     fun normalizeTitle(title: String): String =
         title.lowercase()
             .replace(titleNoiseRegex, "")
-            .replace(Regex("[^\\p{IsHan}a-z0-9]+"), "")
+            .replace(compactTitleRegex, "")
             .trim()
 
     private data class ColorSample(
@@ -1130,6 +1178,9 @@ class ProductTextParser {
         val greenRatio: Double
     )
 
+    // 采样点集合与原逐像素 getPixel 版本完全一致（x/y 均 step=3），仅把每像素一次 JNI
+    // 调用合并成每采样行一次 getPixels 批量读取——识别管线里每行文本都要过一遍这函数，
+    // 原实现一次识别要发起数万次 JNI 单像素调用
     private fun sampleTextColor(bitmap: Bitmap?, rect: Rect): ColorSample {
         if (bitmap == null || rect.isEmpty) return ColorSample(0.08, 0.65, 0.0, 0.0)
 
@@ -1139,17 +1190,23 @@ class ProductTextParser {
         val bottom = rect.bottom.coerceIn(top + 1, bitmap.height)
         val step = 3
 
+        val width = right - left
+        val height = bottom - top
+        if (width <= 0 || height <= 0) return ColorSample(0.08, 0.65, 0.0, 0.0)
+        val row = IntArray(width)
+
         var total = 0
         var dark = 0
         var light = 0
         var red = 0
         var green = 0
 
-        var y = top
-        while (y < bottom) {
-            var x = left
-            while (x < right) {
-                val pixel = bitmap.getPixel(x, y)
+        var y = 0
+        while (y < height) {
+            bitmap.getPixels(row, 0, width, left, top + y, width, 1)
+            var x = 0
+            while (x < width) {
+                val pixel = row[x]
                 val r = pixel shr 16 and 0xff
                 val g = pixel shr 8 and 0xff
                 val b = pixel and 0xff
