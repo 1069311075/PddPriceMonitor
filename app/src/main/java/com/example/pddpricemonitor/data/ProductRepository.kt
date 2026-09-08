@@ -5,6 +5,8 @@ import com.example.pddpricemonitor.ocr.DetectedProduct
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class ProductPriceComparison(
     val matchedTitle: String,
@@ -56,6 +58,8 @@ class ProductRepository(
 
     fun observeAll(): Flow<List<ProductPrice>> = dao.observeAll()
 
+    fun observeNewLowTodayIds(todayStart: Long): Flow<List<Long>> = dao.observeNewLowTodayIds(todayStart)
+
     fun observeHistory(productId: Long): Flow<List<ProductPriceHistory>> = dao.observeHistory(productId)
 
     suspend fun clearAll() {
@@ -65,6 +69,13 @@ class ProductRepository(
         screenshotStore.deleteAll()
     }
 
+    // 墓碑写入统一入口：INSERT IGNORE 占位 + MAX 推进 deletedAt。两步非原子但语义收敛——
+    // 无论并发顺序如何，同键墓碑的删除时间最终取两侧较大值
+    private suspend fun upsertTombstone(t: SyncTombstone) {
+        dao.insertTombstone(t)
+        dao.bumpTombstoneDeletedAt(t.targetType, t.keyTitle, t.recordedAt, t.deviceId, t.deletedAt)
+    }
+
     suspend fun deleteProduct(productId: Long) {
         val product = dao.getProductById(productId)
         val historyIds = dao.getHistoryIdsForProduct(productId)
@@ -72,7 +83,7 @@ class ProductRepository(
         dao.deleteProductById(productId)
         if (historyIds.isNotEmpty()) screenshotStore.deleteFor(historyIds)
         if (product != null) {
-            dao.insertTombstone(
+            upsertTombstone(
                 SyncTombstone(
                     targetType = "product",
                     keyTitle = product.normalizedTitle,
@@ -261,15 +272,26 @@ class ProductRepository(
             )
         }
 
+    // 主机模式下多台设备可同时推全量，reader 协程并发进入时历史判重快照各自为政，
+    // 同一条 (recordedAt, deviceId) 会被插入两次——整个合并串行化
+    private val mergeMutex = Mutex()
+
     // 合并远端数据：先吸收并应用对方墓碑（删掉本地对应数据），再按本地墓碑过滤后合并。
     // 返回新插入的记录数；0 表示对方数据已全部拥有（幂等，重复对账无副作用）
     suspend fun mergeFromPeer(
         peerProducts: List<PeerProductData>,
         peerTombstones: List<PeerTombstone> = emptyList()
+    ): Int = mergeMutex.withLock {
+        mergeFromPeerLocked(peerProducts, peerTombstones)
+    }
+
+    private suspend fun mergeFromPeerLocked(
+        peerProducts: List<PeerProductData>,
+        peerTombstones: List<PeerTombstone>
     ): Int {
         // 1. 吸收墓碑入库（幂等去重）：后续本机再连第三台设备时墓碑能继续传递
         peerTombstones.forEach { t ->
-            dao.insertTombstone(
+            upsertTombstone(
                 SyncTombstone(
                     targetType = t.targetType,
                     keyTitle = t.keyTitle,

@@ -46,29 +46,37 @@ class MediaProjectionController(
         val density = metrics.densityDpi
         val manager = context.getSystemService(MediaProjectionManager::class.java)
 
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        projection = manager.getMediaProjection(resultCode, data).also { mediaProjection ->
-            mediaProjection.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    _isActive.value = false
-                    onProjectionStopped()
-                }
-            }, null)
-        }
-        virtualDisplay = projection?.createVirtualDisplay(
-            "pdd-price-monitor",
-            width,
-            height,
-            density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null,
-            null
-        )
+        // token 失效（系统重启后重发旧 Intent、授权过期、API 34 前台服务类型时序）时
+        // getMediaProjection 抛 SecurityException/IllegalStateException——不兜住的话
+        // 异常沿 onStartCommand 上抛直接崩溃，且已创建的 ImageReader 泄漏
+        return try {
+            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            projection = manager.getMediaProjection(resultCode, data).also { mediaProjection ->
+                mediaProjection.registerCallback(object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        _isActive.value = false
+                        onProjectionStopped()
+                    }
+                }, null)
+            }
+            virtualDisplay = projection?.createVirtualDisplay(
+                "pdd-price-monitor",
+                width,
+                height,
+                density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface,
+                null,
+                null
+            )
 
-        bitmapSource = ImageReaderBitmapSource(requireNotNull(imageReader))
-        _isActive.value = true
-        return bitmapSource
+            bitmapSource = ImageReaderBitmapSource(requireNotNull(imageReader))
+            _isActive.value = true
+            bitmapSource
+        } catch (e: Exception) {
+            release()
+            null
+        }
     }
 
     fun acquireBitmap() = bitmapSource?.acquireLatestBitmap()

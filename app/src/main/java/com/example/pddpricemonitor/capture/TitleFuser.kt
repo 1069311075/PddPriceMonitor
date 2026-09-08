@@ -16,6 +16,9 @@ import javax.inject.Singleton
  *   标题行自身的误读会命中自己的探针给自己投票）
  * - 有证据的平票保守取第一遍：二遍要"赢得"替换权；双方零证据（页面无独立证人）时
  *   取二遍——裁剪放大重识别的单字读法物理上更清晰
+ * - 繁简守卫：PDD 大陆标题全为简体，二读的繁体字形（腻→膩/春→賽）是放大重读的
+ *   字形混淆，简读在场即胜——优先于投票（证人与二读同为 OCR 产物，弱票压不过
+ *   「标题必简体」的强先验）。反向（一读繁二读简，速→遠）由 0:0 默认信二遍自然覆盖
  * - 插入/删除段取第二遍（大图看到的字符增删更可信，如"饮次品"→"饮品"）
  * - 纯字符串运算，零额外 OCR 开销
  */
@@ -56,7 +59,9 @@ class TitleFuser @Inject constructor() {
         // ML Kit 把夹在汉字间的 0 误读成 O 的分歧在投票前就该消失（详见 normalizeDomainGlyphs）
         val normalizedFirst = normalizeDomainGlyphs(firstTitle)
         val normalizedSecond = normalizeDomainGlyphs(secondTitle)
-        val corpus = (witnessLines ?: pageLines).joinToString("\n")
+        // 语料必须同步归一化：探针字符来自归一化后的标题（0脂），语料若保留原始误读
+        // （O脂）则永远匹配不上，该字位 0:0 静默走默认分支——证人证据被白白丢弃
+        val corpus = (witnessLines ?: pageLines).joinToString("\n") { normalizeDomainGlyphs(it) }
         val ops = align(normalizedFirst, normalizedSecond)
         val secondChars = normalizedSecond.toCharArray()
         val out = StringBuilder()
@@ -71,8 +76,9 @@ class TitleFuser @Inject constructor() {
             }
             if (a != null && a != b) {
                 val (winner, firstVotes, secondVotes) = vote(a, b, left, right, corpus)
+                val source = if (!isSimplifiedHan(b) && isSimplifiedHan(a)) "t2s" else "char"
                 out.append(winner)
-                disagreements += Disagreement(a.toString(), b.toString(), winner.toString(), firstVotes, secondVotes)
+                disagreements += Disagreement(a.toString(), b.toString(), winner.toString(), firstVotes, secondVotes, source)
             } else {
                 out.append(b)
             }
@@ -185,15 +191,32 @@ class TitleFuser @Inject constructor() {
             fv += count(corpus, first.toString())
             sv += count(corpus, second.toString())
         }
-        // 双方都零票 = 页面没有任何独立证据：信二遍——裁剪放大后笔画更清晰，单字识别
-        // 物理上优于整页缩略图（速/遠案例：一遍误读只出现在标题行自身，剔除自证后 0:0）。
-        // 有证据的平票（如 1:1）仍取第一遍，保持"二遍要赢得替换权"的保守基线
         val winner = when {
+            // 繁简守卫：二读是繁体字形而一读是简体时简读直接胜出——PDD 标题必为简体，
+            // 繁体读法是放大重读的字形混淆（蜜桃汁页：春→賽/腻→膩，证人 0:0 下旧默认
+            // 分支把两个错读全放行）。放在投票之前：证人与二读同为 OCR 产物，弱票
+            // 证据压不过「标题必简体」的强先验
+            !isSimplifiedHan(second) && isSimplifiedHan(first) -> first
             sv > fv -> second
+            // 双方都零票 = 页面没有任何独立证据：信二遍——裁剪放大后笔画更清晰，单字识别
+            // 物理上优于整页缩略图（速/遠案例：一遍误读只出现在标题行自身，剔除自证后 0:0）。
+            // 有证据的平票（如 1:1）仍取第一遍，保持"二遍要赢得替换权"的保守基线
             fv == 0 && sv == 0 -> second
             else -> first
         }
         return Triple(winner, fv, sv)
+    }
+
+    // GB2312 一二级字库只收简体规范汉字：CJK 字符能否编码即简繁判定，无需内置映射表
+    // （賽/膩/請/遠 均不在 GB2312 中）。非汉字（拉丁/数字/假名）不参与判定恒为 true；
+    // 运行环境无此字符集时守卫自动失效（全部按简体处理，规则退化关闭）
+    private val gb2312Charset: java.nio.charset.Charset? =
+        runCatching { java.nio.charset.Charset.forName("GB2312") }.getOrNull()
+
+    internal fun isSimplifiedHan(c: Char): Boolean {
+        if (c.code !in CJK_START..CJK_END) return true
+        val charset = gb2312Charset ?: return true
+        return charset.newEncoder().canEncode(c.toString())
     }
 
     companion object {

@@ -21,6 +21,29 @@ interface ProductPriceDao {
     @Query("SELECT MIN(priceCents) FROM product_price_history WHERE productId = :productId")
     suspend fun getLowestHistoryPrice(productId: Long): Long?
 
+    // 今日新低商品：最新一条记录是今天产生、价格等于该商品历史最低、且严格低于上一条记录。
+    // 全标准 SQL（相关子查询 + 聚合 JOIN），不依赖窗口函数；同毫秒多设备重复记录用
+    // h2.recordedAt < h.recordedAt 严格取次新，DISTINCT 防 JOIN 放大
+    @Query(
+        """
+        SELECT DISTINCT h.productId FROM product_price_history h
+        INNER JOIN (
+            SELECT productId, MAX(recordedAt) AS maxAt, MIN(priceCents) AS minPrice, COUNT(*) AS cnt
+            FROM product_price_history GROUP BY productId
+        ) agg ON agg.productId = h.productId
+        WHERE h.recordedAt = agg.maxAt
+          AND h.recordedAt >= :todayStart
+          AND h.priceCents = agg.minPrice
+          AND agg.cnt >= 2
+          AND h.priceCents < (
+              SELECT h2.priceCents FROM product_price_history h2
+              WHERE h2.productId = h.productId AND h2.recordedAt < h.recordedAt
+              ORDER BY h2.recordedAt DESC, h2.id DESC LIMIT 1
+          )
+        """
+    )
+    fun observeNewLowTodayIds(todayStart: Long): Flow<List<Long>>
+
     @Query("SELECT * FROM product_prices")
     suspend fun getAllOnce(): List<ProductPrice>
 
@@ -58,6 +81,21 @@ interface ProductPriceDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertTombstone(t: SyncTombstone)
+
+    // 配合 insertTombstone(IGNORE) 实现墓碑 UPSERT：同键已存在时把删除时间推到较新值。
+    // 同一商品「删除→重记→再删」时第二次删除必须盖掉旧 deletedAt，否则对端按旧时间
+    // 判定「删除后又重新记价」放行，已删商品在对端复活
+    @Query(
+        "UPDATE sync_tombstones SET deletedAt = MAX(deletedAt, :deletedAt) " +
+            "WHERE targetType = :targetType AND keyTitle = :keyTitle AND recordedAt = :recordedAt AND deviceId = :deviceId"
+    )
+    suspend fun bumpTombstoneDeletedAt(
+        targetType: String,
+        keyTitle: String,
+        recordedAt: Long,
+        deviceId: String,
+        deletedAt: Long
+    )
 
     @Query("SELECT * FROM sync_tombstones")
     suspend fun getAllTombstones(): List<SyncTombstone>

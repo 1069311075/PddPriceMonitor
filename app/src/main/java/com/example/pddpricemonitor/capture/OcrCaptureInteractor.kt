@@ -294,10 +294,13 @@ class OcrCaptureInteractor @Inject constructor(
         val firstHasDecimal = firstCents % 100 != 0L || product.rawText.contains('.')
         val widthPx = right - left
         val heightPx = bottom - top
-        val firstZoom = zoomRecognizeAt(prepared, widthPx, heightPx, PRICE_SCALE)
-        val firstZoomText = firstZoom.text.text
+        // prepared 的回收必须罩住整个放大识别段：zoomRecognizeAt 内 ML Kit 抛异常时
+        // 执行流直接跳出 runCatching，try 之外的回收代码到不了，位图泄漏
+        val firstZoom: ZoomOutcome
         val tightZoomText: String?
         try {
+            firstZoom = zoomRecognizeAt(prepared, widthPx, heightPx, PRICE_SCALE)
+            val firstZoomText = firstZoom.text.text
             tightZoomText =
                 if (!firstHasDecimal && parser.zoomedPriceCandidates(firstZoomText).none { it.hasDecimal }) {
                     tightDigitZoom(prepared, firstZoom)
@@ -307,6 +310,7 @@ class OcrCaptureInteractor @Inject constructor(
         } finally {
             runCatching { prepared.recycle() }
         }
+        val firstZoomText = firstZoom.text.text
         val candidates = (
             parser.zoomedPriceCandidates(firstZoomText) +
                 (tightZoomText?.let { parser.zoomedPriceCandidates(it) } ?: emptyList())

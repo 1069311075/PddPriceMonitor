@@ -186,14 +186,14 @@ class SyncController @Inject constructor(
 
         // 读协程：阻塞读行 → 分发处理
         session.readerJob = scope.launch {
-            var peer: Peer? = null
             try {
                 send(SyncMessage.Hello(deviceId, deviceName))
                 while (true) {
                     val line = reader.readLine() ?: break
                     when (val message = SyncProtocol.decode(line)) {
                         is SyncMessage.Hello -> {
-                            peer = Peer(message.deviceId, message.deviceName)
+                            val peer = Peer(message.deviceId, message.deviceName)
+                            session.peer = peer
                             addPeer(peer)
                             // 握手完成即对账：互发全量（含墓碑）
                             send(SyncMessage.Full(repository.exportForSync(), repository.exportTombstones()))
@@ -216,7 +216,13 @@ class SyncController @Inject constructor(
                 session.writerJob?.cancel()
                 session.changeJob?.cancel()
                 sessions.remove(session)
-                peer?.let { removePeer(it, isHost) }
+                // 同设备快速重连时新会话已注册同 deviceId 的 peer 条目——旧会话迟到退出
+                // （无读超时，可能悬挂很久）不能把活条目一并删掉：removePeer 按 deviceId
+                // 过滤不分新旧，误删后 UI 状态回退但新会话的数据同步其实还在跑
+                val p = session.peer
+                if (p != null && sessions.none { it.peer?.deviceId == p.deviceId }) {
+                    removePeer(p, isHost)
+                }
             }
         }
 
@@ -268,6 +274,8 @@ class SyncController @Inject constructor(
         val outgoing: Channel<String>
     ) {
         @Volatile var alive = true
+        // 本会话握手登记的对端：reader 协程写、其他会话的清理逻辑读，跨线程可见
+        @Volatile var peer: Peer? = null
         var writerJob: Job? = null
         var readerJob: Job? = null
         var changeJob: Job? = null

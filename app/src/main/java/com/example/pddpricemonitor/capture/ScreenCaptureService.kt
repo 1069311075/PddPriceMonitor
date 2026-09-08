@@ -69,19 +69,29 @@ class ScreenCaptureService : Service() {
     }
 
     private fun startCapture(resultCode: Int, data: Intent) {
-        // 已在运行：只确保悬浮球显示
+        // 已在运行：只确保悬浮球显示（球可能已被系统摘过，controller 自愈后回到这里兜底）
         if (projectionController?.isStarted == true) {
-            if (overlayController?.isShowing != true) {
-                getOverlayController().show()
+            if (overlayController?.isShowing != true && !getOverlayController().show()) {
+                stopSelf()
+                return
             }
             isRunning = true
             return
         }
 
         val controller = getProjectionController()
-        controller.start(resultCode, data)
+        // 投射 token 失效时 start 返回 null（异常已在内部兜底清理）——别亮悬浮球，直接停服务
+        if (controller.start(resultCode, data) == null) {
+            MonitorDebugState.update("屏幕投射启动失败，请重新授权")
+            stopSelf()
+            return
+        }
 
-        getOverlayController().show()
+        if (!getOverlayController().show()) {
+            MonitorDebugState.update("悬浮窗启动失败，请检查悬浮窗权限")
+            stopSelf()
+            return
+        }
         MonitorDebugState.update("悬浮球已就绪，去商品页点它")
         isRunning = true
     }
@@ -89,8 +99,18 @@ class ScreenCaptureService : Service() {
     private fun captureOnce() {
         if (worker?.isActive == true) return
         val controller = projectionController ?: return
+        // 结果面板还开着时再点球 = 「重新识别」语义：上一条未确认的自动保存视为作废；
+        // 面板已自动收起则属「隐式落账」后的新一轮识别，不动旧数据。
+        // 主线程读面板可见性后传入；撤回在 worker 内同步完成再开拍，避免与新一轮入库交错
+        val abandonPending = overlayController?.isPanelShowing == true
 
         worker = scope.launch {
+            if (abandonPending) {
+                pendingAutoSavedHistoryId?.let { oldId ->
+                    pendingAutoSavedHistoryId = null
+                    ocrInteractor.deleteHistoryEntry(oldId)
+                }
+            }
             overlayController?.updateState(BallState.SCANNING, showPanel = false)
 
             val result = ocrInteractor.captureOnce(
@@ -155,18 +175,18 @@ class ScreenCaptureService : Service() {
     private fun autoSaveEnabled(): Boolean = CapturePrefs.isAutoSaveEnabled(this)
 
     // 最近一次「识别后自动保存」、尚未经用户确认的历史行 id：
-    // 面板「修改保存」撤回该行再按面板值重新入库；「重新识别」视为本次作废，同样撤回
+    // 面板「修改保存」撤回该行再按面板值重新入库；「重新识别」（面板按钮，或面板
+    // 开着时再点球）视为本次作废，同样撤回；面板自动收起则隐式落账，被下一次识别顶替
     private var pendingAutoSavedHistoryId: Long? = null
 
-    private fun discardPendingAutoSave() {
-        val oldId = pendingAutoSavedHistoryId ?: return
-        pendingAutoSavedHistoryId = null
-        scope.launch { ocrInteractor.deleteHistoryEntry(oldId) }
-    }
+    // 保存按钮防抖：双击「保存」会开两个协程重复入库；回执模式双击「修改保存」更糟——
+    // 第一击撤回自动保存行并入库，第二击 pending 已空再独立入库一条，错值对值并存
+    private var saveJob: Job? = null
 
     private fun saveEditedProduct(title: String, priceCents: Long, ocrTitle: String) {
+        if (saveJob?.isActive == true) return
         val product = ocrInteractor.createDetectedProduct(title, priceCents, ocrTitle)
-        scope.launch {
+        saveJob = scope.launch {
             // 回执模式的「修改保存」：自动保存的行还没被用户确认——先撤回
             // （截图退回暂存位、行删除、连带空壳商品清理与同步墓碑），再按面板值
             // 重新入库，否则识别错值会留在账里，纠错就名不副实了
@@ -215,13 +235,19 @@ class ScreenCaptureService : Service() {
                     }
 
                     override fun onReCaptureClick() {
-                        discardPendingAutoSave()
+                        // 面板按钮触发时面板必然展示中，captureOnce 内部即完成撤回
                         captureOnce()
                     }
 
                     override fun onPriceChanged(priceCents: Long?) {
                         // 价格变化时对比条已在 FloatingOverlayController 内部更新
                         // 这里预留扩展点
+                    }
+
+                    override fun onBallLost() {
+                        // 球被系统摘除且自愈失败（悬浮窗权限被撤/ROM 限制）：服务已无
+                        // 存在意义，停掉让主界面回到「等待启动」，而不是僵尸「运行中」
+                        stopSelf()
                     }
                 }
             )

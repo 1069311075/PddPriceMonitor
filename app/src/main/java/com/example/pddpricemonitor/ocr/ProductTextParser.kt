@@ -187,7 +187,20 @@ class ProductTextParser {
         "^\\s*\\u767E[\\u8D34\\u4EBF\\u8865\\u5C0FEe\\u59160-9]{0,4}\\s*\\u54C1\\u724C\\s*[|\\uFF5C]?\\s*"
     )
     private val serviceWordStripRegex = Regex(
-        "(\\u6708\\u5361\\u4E13\\u4EAB|\\u9000\\u8D27\\u5305\\u8FD0\\u8D39|\\u964D\\u4EF7\\u8865\\u5DEE|\\u6B63\\u54C1\\u53D1\\u7968|\\u987A\\u4E30\\u5305\\u90AE|\\u540E\\u5929\\u8FBE|24\\u5C0F\\u65F6\\u53D1\\u8D27|\\u4E70\\u8D35\\u53CC\\u500D\\u8D54)"
+        "(\u6708\u5361\u4E13\u4EAB|\u9000\u8D27\u5305\u8FD0\u8D39|\u964D\u4EF7\u8865\u5DEE|\u6B63\u54C1\u53D1\u7968|\u987A\u4E30\u5305\u90AE|\u540E\u5929\u8FBE|24\u5C0F\u65F6\u53D1\u8D27|\u4E70\u8D35\u53CC\u500D\u8D54)"
+    )
+    // 标题里的售后承诺后缀：PDD 把「三包承诺」等服务短语并进标题行尾（NAS 页
+    // 「…固态智能中枢三包承诺」），污染商品名。「三包」必须带服务词续接才剥——
+    // 裸「三包」可能是数量词（抽纸三包装/口罩三包）；续接字符含 OCR 误读字母表
+    // （承诺→承诸），二遍放大重读的行同样能命中
+    private val titleServiceSuffixRegex = Regex(
+        "(\u4E09\u5305[\u627F\u670D\u52A1\u6B63\u4FDD][\u8BFA\u8BEB\u52A1\u54C1\u969C\u8D54]?" +
+            "|(?:\u4E03|7)\\s*\u5929?\u65E0\u7406\u7531\u9000[\u6362\u8D27\u6B3E]{0,2}" +
+            "|\u65E0\u7406\u7531\u9000[\u6362\u8D27\u6B3E]{0,2}" +
+            "|\u5047\u4E00\u8D54[\u5341\u767E]" +
+            "|(?:\u574F\u4E86|\u574F\u679C|\u7834\u635F|\u70C2\u679C)\u5305\u8D54" +
+            "|\u672A\u53D1\u8D27\u79D2\u9000" +
+            "|\u5168\u56FD\u8054\u4FDD)"
     )
     private val bracketStripRegex = Regex("[\\[\\]{}()\\uFF08\\uFF09|]+")
     private val whitespaceRegex = Regex("\\s+")
@@ -311,18 +324,6 @@ class ProductTextParser {
             rawText = priceLine.text,
             ocrTitle = title
         )
-    }
-
-    private fun findMainBlackTitleLine(lines: List<OcrLine>): OcrLine? {
-        val screenHeight = lines.firstOrNull { it.screenHeight > 0 }?.screenHeight ?: return null
-        return lines
-            .filter { it.rect.top in (screenHeight * 0.46).toInt()..(screenHeight * 0.80).toInt() }
-            .filter { isStructuredTitleLine(it) }
-            .filter { normalizeTitle(cleanupTitleText(it.text)).length >= 8 }
-            .maxWithOrNull(
-                compareBy<OcrLine> { normalizeTitle(cleanupTitleText(it.text)).length }
-                    .thenBy { it.darkRatio }
-            )
     }
 
     private fun findMainTitleLineAboveBottomBar(lines: List<OcrLine>, priceLine: OcrLine): OcrLine? {
@@ -608,6 +609,12 @@ class ProductTextParser {
             val line = nearby[i]
             if (line.rect.top - previousBottom > 120) break
             if (!isNextTitleContinuation(firstLine, line)) break
+            // 墨色一致性：标题块是同字号黑体的连续行，已收集行的最低黑度是块内基准；
+            // 候选行黑度跌破基准 55% 说明是标题块下方的灰卖点行（NAS 页「优势:最大16T
+            // 海量空间…」dark=0.116 vs 真标题 0.252，灰度只有一半但过了 isBlackTitleLine
+            // 的 0.045 淡字下限）。比值判据而非绝对阈值：淡字标题块整体 dark 低时同样成立
+            val minDark = titleLines.minOf { it.darkRatio }
+            if (line.darkRatio < minDark * 0.55) break
             titleLines += line
             previousBottom = line.rect.bottom
         }
@@ -750,6 +757,10 @@ class ProductTextParser {
         val cleaned = cleanupTitleText(line.text)
         val compactLength = normalizeTitle(cleaned).length
         var score = compactLength * 3
+        // 品牌前缀（【小米】/品牌/旗舰店…）是标题块首行的结构性标志：灰卖点行和普通
+        // 描述行都不带。looseDetailTitleScore 早有此项(+120)，黑体路径缺失导致 NAS 页
+        // 首行（带【小米】但贴着红角标丢 35 分）输给下方灰卖点行，标题首行整行丢失
+        if (titleStartRegex.containsMatchIn(cleaned)) score += 150
         when {
             isBlackTitleLine(line) -> score += 260
             isWeakBlackTitleLine(line) -> score += 55
@@ -778,14 +789,6 @@ class ProductTextParser {
             score -= 1000
         }
         return score
-    }
-
-    private fun isStrictTitleContinuation(firstLine: OcrLine, line: OcrLine): Boolean {
-        if (!isLooseTitleLine(line)) return false
-        if (line == firstLine) return true
-        if (!isTitleLineRelated(firstLine, line)) return false
-        if ((line.greenRatio >= 0.12 && !isGreenOnlyFromInkBadge(line)) || line.redRatio >= 0.14) return false
-        return isBlackTitleLine(line)
     }
 
     private fun isPreviousTitleContinuation(firstLine: OcrLine, line: OcrLine): Boolean {
@@ -845,34 +848,6 @@ class ProductTextParser {
         val overlap = minOf(first.rect.right, next.rect.right) - maxOf(first.rect.left, next.rect.left)
         val minWidth = minOf(first.rect.width(), next.rect.width()).coerceAtLeast(1)
         return overlap > minWidth * 0.45
-    }
-
-    private fun findTitleBelowPrice(lines: List<OcrLine>, priceLine: OcrLine): String? {
-        val maxTop = priceLine.rect.bottom + 520
-        val region = lines
-            .filter { it.rect.top in priceLine.rect.bottom..maxTop }
-            .filterNot { isBottomOverlayLine(it) }
-
-        findProductTitleBlock(region)?.let { return it }
-
-        return region
-            .filter { isTitleCandidateLine(it) }
-            .filterNot { isTitleStopLine(it.text) }
-            .map { cleanupTitleText(it.text) }
-            .filter { isLikelyTitle(it) }
-            .maxByOrNull { titleScore(it) }
-    }
-
-    private fun findTitleAbovePrice(lines: List<OcrLine>, priceLine: OcrLine): String? {
-        val minTop = priceLine.rect.top - 700
-        return lines
-            .filter { it.rect.top in minTop..priceLine.rect.top }
-            .filterNot { isBottomOverlayLine(it) }
-            .filter { isTitleCandidateLine(it) }
-            .filterNot { isTitleStopLine(it.text) }
-            .map { cleanupTitleText(it.text) }
-            .filter { isLikelyTitle(it) }
-            .maxByOrNull { titleScore(it) }
     }
 
     private fun extractPriceCents(line: OcrLine): Long? =
@@ -1120,6 +1095,7 @@ class ProductTextParser {
             // 补贴误读字母表（贴亿补小Ee外+数字，亿会被读成1），不会吞掉「百果园品牌」真品牌文本
             .replace(badgeVariantBrandRegex, " ")
             .replace(serviceWordStripRegex, " ")
+            .replace(titleServiceSuffixRegex, " ")
             .replace(bracketStripRegex, " ")
             .replace(whitespaceRegex, " ")
             .trim()
@@ -1153,14 +1129,10 @@ class ProductTextParser {
             titleScore(text) >= 10
     }
 
+    // 评分只看结构特征（长度/品牌前缀），不含特定商品词：早期电脑硬件商品
+    // （ROG/U9/5090/DIY/主机/电脑）的加分已清理——特定词规则是补丁不是修复
     private fun titleScore(text: String): Int {
         var score = normalizeTitle(text).length
-        if (text.contains("ROG", ignoreCase = true)) score += 8
-        if (text.contains("U9", ignoreCase = true)) score += 5
-        if (text.contains("5090", ignoreCase = true) || text.contains("5080", ignoreCase = true)) score += 5
-        if (text.contains("DIY", ignoreCase = true)) score += 4
-        if (text.contains("\u4E3B\u673A")) score += 4
-        if (text.contains("\u7535\u8111")) score += 4
         if (titleStartRegex.containsMatchIn(text)) score += 12
         return score
     }

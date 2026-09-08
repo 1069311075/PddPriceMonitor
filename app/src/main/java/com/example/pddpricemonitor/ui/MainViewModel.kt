@@ -10,11 +10,16 @@ import com.example.pddpricemonitor.sync.DiscoveredRoom
 import com.example.pddpricemonitor.sync.SyncController
 import com.example.pddpricemonitor.sync.SyncState
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.ZoneId
 import javax.inject.Inject
 
 @HiltViewModel
@@ -25,6 +30,28 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
     val products: StateFlow<List<ProductPrice>> = repository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // 「今日」的起点：每分钟重算一次，跨天挂着 App 统计口径也会自动翻篇
+    private val todayStart = MutableStateFlow(currentDayStart())
+
+    init {
+        viewModelScope.launch {
+            while (true) {
+                todayStart.value = currentDayStart()
+                delay(60_000)
+            }
+        }
+    }
+
+    // 今日创历史新低的商品 id 集（最新记录是今天、价=历史最低、且低于上次）：
+    // 统计计数与点击过滤共用
+    val newLowTodayIds: StateFlow<Set<Long>> = todayStart
+        .flatMapLatest { repository.observeNewLowTodayIds(it) }
+        .map { it.toSet() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    private fun currentDayStart(): Long =
+        LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
 
     // 截图存档开关：主界面 UI 状态；识别服务每次识别时直接读 ScreenshotStore 的持久化值
     private val _saveScreenshots = MutableStateFlow(screenshotStore.isEnabled())

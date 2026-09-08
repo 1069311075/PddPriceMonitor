@@ -257,6 +257,8 @@ class FloatingOverlayController(
         fun onSaveClick(title: String, priceCents: Long, ocrTitle: String)
         fun onReCaptureClick()
         fun onPriceChanged(priceCents: Long?)
+        // 球窗口被系统摘除且自愈失败（悬浮窗权限被撤/ROM 反复摘窗）：服务已无存在意义
+        fun onBallLost()
     }
 
     // 单击=价格识别；双击=轮换跳转比价应用（一个都没设则回拼多多）；长按=跳转拼多多。
@@ -317,6 +319,13 @@ class FloatingOverlayController(
     // 面板窗口：独立窗口，随显隐挂载/移除，位置始终跟随球
     private var panelView: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
+
+    // 本方主动摘窗标志：destroy() 摘窗前置位——detach 哨兵靠它区分「自己关的」
+    // 和「系统摘的」，只有后者才走自愈/上报
+    @Volatile private var selfRemoving = false
+    // 意外摘除的自愈限速：短窗口内反复被系统摘（ROM 限制循环）时放弃重挂
+    private var lastDetachAt = 0L
+    private var detachBurst = 0
 
     // 边签相关
     private var ballWrap: FrameLayout? = null
@@ -406,8 +415,12 @@ class FloatingOverlayController(
         }
     }
 
-    fun show() {
-        if (!Settings.canDrawOverlays(context) || overlayView != null) return
+    // @return 球是否成功挂上窗口（权限缺失/addView 抛异常都返回 false，
+    //         调用方据此停服务，避免「服务跑着但球不存在」的僵尸态）
+    fun show(): Boolean {
+        if (!Settings.canDrawOverlays(context)) return false
+        // 僵尸引用守卫：权限被撤或 ROM 清理后 overlayView 可能还持着已摘除的 View
+        if (overlayView?.isAttachedToWindow == true) return true
 
         windowManager = context.getSystemService(WindowManager::class.java)
         val ball = createBallView()
@@ -431,8 +444,31 @@ class FloatingOverlayController(
             windowManager?.addView(ball, overlayParams)
         }.onFailure {
             overlayView = null
-            return
+            return false
         }
+
+        // 系统摘窗哨兵：权限被撤/ROM 后台清理摘掉 overlay 窗口时，系统不会通知
+        // 服务——球没了服务还在跑，主界面永远显示「运行中」。在 detach 瞬间感知：
+        // 权限还在就重挂（自愈），重挂不动或权限没了才上报停服务
+        ball.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {}
+
+            override fun onViewDetachedFromWindow(v: View) {
+                if (selfRemoving || v !== overlayView) return
+                val now = SystemClock.elapsedRealtime()
+                detachBurst = if (now - lastDetachAt < REATTACH_WINDOW_MS) detachBurst + 1 else 1
+                lastDetachAt = now
+                overlayView = null
+                // 球被摘时面板若还悬着（独立窗口系统未必连坐），一并收掉
+                detachPanelSilently()
+                if (detachBurst <= MAX_REATTACH_ATTEMPTS &&
+                    Settings.canDrawOverlays(context) && show()
+                ) {
+                    return
+                }
+                callbacks.onBallLost()
+            }
+        })
 
         // 入场：从所在边缘"长出来"（贴哪条边就朝屏内滑入）
         val slideFrom = if (currentTabOnRight()) {
@@ -467,6 +503,19 @@ class FloatingOverlayController(
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         }
         attachDrag(panelRoot)
+        return true
+    }
+
+    // 意外摘球时同步收面板：不走收起动画（球已不在，面板悬空属异常态），直接摘窗
+    private fun detachPanelSilently() {
+        cancelAutoCollapse()
+        panelSlideAnimator?.cancel()
+        resultPanel?.animate()?.cancel()
+        animateGripExtend(0f)
+        panelView?.let { pv ->
+            if (pv.isAttachedToWindow) runCatching { windowManager?.removeView(pv) }
+        }
+        panelView = null
     }
 
     private fun createBallView(): FrameLayout {
@@ -966,6 +1015,12 @@ class FloatingOverlayController(
 
     // ---- 状态更新 ----
 
+    // 结果面板（卡片）是否正展示中：服务侧据此把「面板开着时再点球」判为重新识别——
+    // 撤回上一条未确认的自动保存；面板已自动收起则属隐式落账后的新一轮识别，不动旧数据。
+    // 收回动画结束才置 GONE，动画期间按展示中处理
+    val isPanelShowing: Boolean
+        get() = resultPanel?.visibility == View.VISIBLE
+
     suspend fun updateState(state: BallState, showPanel: Boolean) {
         withContext(Dispatchers.Main) {
             setBallState(state)
@@ -1407,6 +1462,8 @@ class FloatingOverlayController(
     // ---- 生命周期 ----
 
     fun destroy() {
+        // 先置位再摘窗：本方主动摘除不触发 detach 哨兵的自愈/上报
+        selfRemoving = true
         cancelAutoCollapse()
         glowPulseAnimator?.cancel()
         glowFadeAnimator?.cancel()
@@ -1432,5 +1489,8 @@ class FloatingOverlayController(
         private const val TAB_H_DP = 76
         private const val TAB_MARGIN_DP = 6
         private const val PANEL_W_DP = 300
+        // 系统摘窗自愈的限速参数：5 秒窗口内最多重挂 2 次，超过判定为 ROM 限制循环
+        private const val REATTACH_WINDOW_MS = 5_000L
+        private const val MAX_REATTACH_ATTEMPTS = 2
     }
 }

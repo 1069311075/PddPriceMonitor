@@ -1,4 +1,4 @@
-package com.example.pddpricemonitor
+﻿package com.example.pddpricemonitor
 
 import android.app.Activity
 import android.content.Context
@@ -12,6 +12,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.animateColorAsState
@@ -19,6 +22,8 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateIntAsState
@@ -41,6 +46,8 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,6 +55,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -83,23 +91,23 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -113,6 +121,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -121,10 +130,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -153,6 +163,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.Image
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -255,8 +266,10 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
     var expandedProductId by rememberSaveable { mutableStateOf<Long?>(null) }
     var pendingDelete by remember { mutableStateOf<ProductPrice?>(null) }
     var clearConfirmStep by rememberSaveable { mutableStateOf(0) }
-    var fullScreenList by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    // 「今日新低」统计项的点击过滤：激活后列表只显示今日创历史新低的商品，再点一次退出
+    var newLowFilter by rememberSaveable { mutableStateOf(false) }
+    val newLowTodayIds by viewModel.newLowTodayIds.collectAsState()
 
     // 长按比价跳转：径向菜单状态 + 应用选择器；选择器保存后 compareRefresh++ 触发重读
     var compareMenu by remember { mutableStateOf<CompareMenuState?>(null) }
@@ -269,9 +282,9 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
     val compareDensity = LocalDensity.current
     val compareHaptic = LocalHapticFeedback.current
 
-    val filteredProducts = remember(products, searchQuery) {
+    val filteredProducts = remember(products, searchQuery, newLowFilter, newLowTodayIds) {
         val query = searchQuery.trim()
-        if (query.isBlank()) {
+        val searched = if (query.isBlank()) {
             products
         } else {
             val normalizedQuery = normalizeSearchText(query)
@@ -280,9 +293,9 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
                     item.normalizedTitle.contains(normalizedQuery, ignoreCase = true)
             }
         }
+        // 新低过滤与搜索叠加：先搜再筛，两边条件同时满足才显示
+        if (newLowFilter) searched.filter { it.id in newLowTodayIds } else searched
     }
-    val todayCount = remember(products) { products.count { isToday(it.updatedAt) } }
-    val updatedCount = remember(products) { products.count { it.updatedAt > it.firstSeenAt } }
 
     val projectionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -295,21 +308,49 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
         }
     }
 
-    // 全屏模式下按系统返回键先退出全屏，而不是直接退出应用——
-    // 用户在全屏列表里按返回，预期永远是"回到上一层级"
-    BackHandler(enabled = fullScreenList) {
-        fullScreenList = false
+    // 展开卡片时自动滚到该卡片，让详情内容立刻进入视野（否则底部卡片展开后内容在屏幕外，看不出已打开）
+    val listState = rememberLazyListState()
+    val listScope = rememberCoroutineScope()
+
+    // 全屏 = 表头（胶囊行/启动卡/搜索/栏头）滚出视野。表头本身就是列表 item 0，
+    // 下滑逐像素跟手滚走（响应即时、无切换动画、无重布局风暴），滚回顶部自然还原；
+    // 进程恢复时滚动位置是 saveable 的，全屏状态跟着自动恢复，无需 rememberSaveable
+    val fullScreenList by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 } }
+
+    // 全屏/新低过滤下按系统返回键先退当前状态，而不是直接退出应用——
+    // 用户在过滤或全屏里按返回，预期永远是"回到上一层级"
+    BackHandler(enabled = fullScreenList || newLowFilter) {
+        if (newLowFilter) {
+            newLowFilter = false
+        } else {
+            listScope.launch { listState.animateScrollToItem(0) }
+        }
     }
 
     LaunchedEffect(Unit) {
         // 打开 app 只看记录，不自动启动悬浮球——
         // 服务还活着就同步下状态徽标（说明球在，不用再点启动）；
         // 服务没活也不再自动弹录屏授权，想识别时点启动卡自行授权
-        if (ScreenCaptureService.isRunning) {
+        if (ScreenCaptureService.isRunning && Settings.canDrawOverlays(context)) {
             captureStarted = true
         }
         // 存量截图补生成卡片商品图（后台一次，已有 t 图跳过）
         viewModel.backfillThumbs()
+    }
+
+    // 回前台对账「运行中」徽标：球丢失可能发生在 app 退居后台期间（服务已自停、
+    // 或服务活着但球被系统摘除）——状态源是服务存活，用户关心的是球在不在，
+    // 每次回前台按当前事实重算，消除僵尸「运行中」
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                captureStarted =
+                    ScreenCaptureService.isRunning && Settings.canDrawOverlays(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     pendingDelete?.let { item ->
@@ -350,19 +391,22 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
     }
 
     val focusManager = LocalFocusManager.current
-    // 展开卡片时自动滚到该卡片，让详情内容立刻进入视野（否则底部卡片展开后内容在屏幕外，看不出已打开）
-    val listState = rememberLazyListState()
-    val listScope = rememberCoroutineScope()
 
-    // 列表一旦滚动就收起搜索键盘：键盘占着半屏滑列表是常态场景，别让用户手动去点空白
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) focusManager.clearFocus()
+    // 列表一旦滚动就收起搜索键盘：键盘占着半屏滑列表是常态场景，别让用户手动去点空白。
+    // 状态读取必须留在 snapshotFlow 管道里——直接作 LaunchedEffect 的 key 会在组合阶段
+    // 订阅 isScrollInProgress，每次滚动起停（一次手势两次）都重组整屏
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) focusManager.clearFocus()
+        }
     }
 
     // 比价径向菜单控制器：回调里读的都是委托状态（compareMenu/rootSize/compareApps），保证拿到最新值；
-    // ProductCard 内部用 rememberUpdatedState 接住，手势协程不会因重组拿到旧引用
-    val compareController = CompareMenuController(
-        apps = compareApps,
+    // ProductCard 内部用 rememberUpdatedState 接住，手势协程不会因重组拿到旧引用。
+    // 必须 remember：每次重组新建实例会让 ProductCard 的 compare 参数引用比较恒失败，
+    // 父级任何状态变化（滚动/同步/识别）都导致全部可见卡片无法 skip 而整列重组
+    val compareController = remember {
+        CompareMenuController(
         onOpen = { item, pos ->
             // 菜单展开即复制标题：即使松手在空白处取消，标题也已在剪贴板（保底原长按复制行为）。
             // APP 在前台，写剪贴板不会触发系统剪贴板悬浮窗；markCopied 同时更新意图账本——
@@ -407,7 +451,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
             }
         },
         onCancel = { compareMenu = null }
-    )
+        )
+    }
 
     Box(
         modifier = Modifier
@@ -439,100 +484,95 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
             )
         }
 
-        AnimatedVisibility(visible = !fullScreenList) {
-            Column {
-                Spacer(modifier = Modifier.height(12.dp))
-                // 未启动时显示状态胶囊（引导启动），启动后只保留红色卡片，避免信息重复
-                if (!captureStarted) {
-                    OcrStatusPill(captureStarted = captureStarted)
-                    Spacer(modifier = Modifier.height(14.dp))
-                }
-                OcrStartCard(
-                    onStartCapture = {
-                        if (ScreenCaptureService.isRunning) {
-                            captureStarted = true
-                        } else if (Settings.canDrawOverlays(context)) {
-                            projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
-                        } else {
-                            context.startActivity(
-                                Intent(
-                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:${context.packageName}")
-                                )
-                            )
-                        }
-                    },
-                    debugMessage = debugInfo.message,
-                    captureStarted = captureStarted
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                StatCards(
-                    todayCount = todayCount,
-                    productCount = products.size,
-                    updatedCount = updatedCount
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                SearchBox(
-                    searchQuery = searchQuery,
-                    onSearchQueryChange = { searchQuery = it }
-                )
-            }
-        }
+        Spacer(modifier = Modifier.height(12.dp))
 
-        Spacer(modifier = Modifier.height(if (fullScreenList) 8.dp else 14.dp))
-
-        SectionHeader(
-            fullScreenList = fullScreenList,
-            filteredCount = filteredProducts.size,
-            totalCount = products.size,
-            onToggleFullScreen = { fullScreenList = !fullScreenList },
-            onClearHistory = { clearConfirmStep = 1 }
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
+        // 表头 = 原仪表盘（胶囊行/启动卡/搜索/栏头），作为列表 item 0 随滚动滚走：
+        // 下滑即时跟手进全屏，滚回顶部自然还原；全屏视图只剩 TopBar + 商品卡，空间最大化
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            if (filteredProducts.isEmpty()) {
-                item {
-                    EmptyState(searchQuery)
+            item(key = "header", contentType = "header") {
+                Column {
+                    // 状态胶囊行：未启动时胶囊在左（引导启动），「今日新低」公告恒定在右——
+                    // 启动后胶囊让位（红卡已传达运行中），公告位置不跳
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (!captureStarted) {
+                            OcrStatusPill(captureStarted = captureStarted)
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        NewLowBadge(
+                            count = newLowTodayIds.size,
+                            active = newLowFilter,
+                            onClick = { newLowFilter = !newLowFilter }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
+                    OcrStartCard(
+                        onStartCapture = {
+                            if (ScreenCaptureService.isRunning) {
+                                captureStarted = true
+                            } else if (Settings.canDrawOverlays(context)) {
+                                projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+                            } else {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            }
+                        },
+                        debugMessage = debugInfo.message,
+                        captureStarted = captureStarted,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SearchBox(
+                        searchQuery = searchQuery,
+                        onSearchQueryChange = { searchQuery = it }
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    SectionHeader(
+                        newLowFilterActive = newLowFilter,
+                        filteredCount = filteredProducts.size,
+                        totalCount = products.size,
+                        onClearHistory = { clearConfirmStep = 1 }
+                    )
                 }
             }
-            itemsIndexed(filteredProducts, key = { _, item -> item.id }) { index, item ->
+            if (filteredProducts.isEmpty()) {
+                item(contentType = "empty") {
+                    EmptyState(searchQuery, newLowFilter)
+                }
+            }
+            // contentType 与空态区分：搜索在「无结果↔有结果」间切换时两种条目结构完全不同，
+            // 不声明会互相复用 composition 槽位，白白丢弃重建一轮
+            itemsIndexed(
+                filteredProducts,
+                key = { _, item -> item.id },
+                contentType = { _, _ -> "product" }
+            ) { index, item ->
                 // animateItem 会缓存条目测量尺寸，与卡片内部 animateContentSize 冲突，
-                // 导致展开时内容被压进过期高度里互相叠印（v0.8.1 叠字 bug 根因），必须去掉
-                StaggeredAppearance(index = index) {
-                    val isExpanded = expandedProductId == item.id
-                    val dismissState = rememberSwipeToDismissBoxState(
-                        confirmValueChange = { value ->
-                            if (value == SwipeToDismissBoxValue.EndToStart) {
-                                pendingDelete = item
-                            }
-                            false
-                        }
-                    )
-                    SwipeToDismissBox(
-                        state = dismissState,
-                        enableDismissFromStartToEnd = false,
-                        // 展开的卡片又高又大：斜着滑列表、或点头部收起时手指带一点横向漂移，
-                        // 都会被误判成左滑删除，红色底纹就莫名闪出来。
-                        // 折线图展开期间干脆禁用横滑手势，收起卡片后再滑才有效
-                        gesturesEnabled = !isExpanded,
-                        backgroundContent = {
-                            // 红底不再常驻：只有滑动真正越过中点（系统判定"打算删除"）时才淡入。
-                            // 轻微误触滑出的缝隙里露出的是页面底色，不再一惊一乍
-                            val revealAlpha by animateFloatAsState(
-                                targetValue = if (dismissState.targetValue == SwipeToDismissBoxValue.EndToStart) 1f else 0f,
-                                animationSpec = tween(durationMillis = 180),
-                                label = "delete-reveal"
-                            )
+                // 导致展开时内容被压进过期高度里互相叠印（v0.8.1 叠字 bug 根因），必须去掉；
+                // index-1 剔除表头占位，保持商品入场交错时序不变
+                StaggeredAppearance(index = index - 1) {
+                    // 读外层展开状态必须过 derivedStateOf：直接读会让展开/收起任何一张卡时
+                    // 全部可见 item 重组，这里只有本卡的判断结果翻转才该触发
+                    val isExpanded by remember { derivedStateOf { expandedProductId == item.id } }
+                    DirectionalSwipeToDelete(
+                        // 折线图展开期间禁用横滑：展开的卡片又高又大，
+                        // 点头部收起时手指带一点漂移不该触发删除
+                        enabled = !isExpanded,
+                        onDismissRequest = { pendingDelete = item },
+                        background = {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .graphicsLayer { alpha = revealAlpha }
                                     .background(BrandRed, RoundedCornerShape(16.dp))
                                     .padding(end = 24.dp),
                                 contentAlignment = Alignment.CenterEnd
@@ -695,9 +735,7 @@ private fun TopBar(
             )
             Spacer(modifier = Modifier.width(5.dp))
             // 已连接时带上最近一次收到数据的时间，方便确认新鲜度（"已同步 14:32"）
-            val syncTimeText = lastSyncAt?.let {
-                java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
-            }
+            val syncTimeText = lastSyncAt?.let { shortTime(it) }
             Text(
                 text = if (syncConnected) {
                     if (syncTimeText != null) "已同步 $syncTimeText" else "已同步"
@@ -1048,45 +1086,37 @@ private fun OcrStatusPill(captureStarted: Boolean) {
         label = "breathe"
     )
     Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.Center
+        modifier = Modifier
+            .background(
+                if (captureStarted) SoftGreen else CardWhite,
+                RoundedCornerShape(50)
+            )
+            .border(1.dp, HairlineBorder, RoundedCornerShape(50))
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
+        Box(
             modifier = Modifier
-                .background(
-                    if (captureStarted) SoftGreen else CardWhite,
-                    RoundedCornerShape(50)
-                )
-                .border(1.dp, HairlineBorder, RoundedCornerShape(50))
-                .padding(horizontal = 14.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(7.dp)
-                    .graphicsLayer {
-                        if (captureStarted) {
-                            scaleX = 0.8f + 0.35f * breathe
-                            scaleY = 0.8f + 0.35f * breathe
-                        }
+                .size(7.dp)
+                .graphicsLayer {
+                    if (captureStarted) {
+                        // scale 与 alpha 都走 layer 属性：原先 alpha 混在背景色里，
+                        // 每帧重录 display list；layer 化后呼吸不再产生绘制工作
+                        scaleX = 0.8f + 0.35f * breathe
+                        scaleY = 0.8f + 0.35f * breathe
+                        alpha = 0.55f + 0.45f * breathe
                     }
-                    .clip(CircleShape)
-                    .background(
-                        if (captureStarted) {
-                            FreshGreen.copy(alpha = 0.55f + 0.45f * breathe)
-                        } else {
-                            TextSecondary
-                        }
-                    )
-            )
-            Spacer(modifier = Modifier.width(7.dp))
-            Text(
-                text = if (captureStarted) "悬浮球已就绪，去拼多多点它" else "等待启动悬浮球",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = if (captureStarted) FreshGreen else TextSecondary
-            )
-        }
+                }
+                .clip(CircleShape)
+                .background(if (captureStarted) FreshGreen else TextSecondary)
+        )
+        Spacer(modifier = Modifier.width(7.dp))
+        Text(
+            text = if (captureStarted) "悬浮球已就绪，去拼多多点它" else "等待启动悬浮球",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (captureStarted) FreshGreen else TextSecondary
+        )
     }
 }
 
@@ -1094,7 +1124,8 @@ private fun OcrStatusPill(captureStarted: Boolean) {
 private fun OcrStartCard(
     onStartCapture: () -> Unit,
     debugMessage: String,
-    captureStarted: Boolean
+    captureStarted: Boolean,
+    modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -1116,8 +1147,7 @@ private fun OcrStartCard(
     )
 
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             .graphicsLayer {
                 scaleX = pressScale
                 scaleY = pressScale
@@ -1180,25 +1210,108 @@ private fun OcrStartCard(
                     }
                 }
             }
-            // 流光层：仅未启动时显示，避免视觉过载
+            // 流光层：仅未启动时显示，避免视觉过载。
+            // 渐变条预绘制为独立 layer，动画只改 translationX——原先 Canvas 每帧重录整张卡的
+            // display list（3.2s 一扫的 60/120fps 常驻重绘）；layer 位移由 GPU 合成完成，
+            // 不重新光栅化，滚动与静止都几乎零成本
             if (!captureStarted) {
-                Canvas(modifier = Modifier.matchParentSize()) {
-                    val bandWidth = size.width * 0.28f
-                    val centerX = size.width * shimmerProgress
-                    translate(left = centerX - bandWidth / 2f) {
-                        drawRect(
-                            brush = Brush.horizontalGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color.White.copy(alpha = 0.14f),
-                                    Color.Transparent
+                var trackWidthPx by remember { mutableFloatStateOf(0f) }
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clip(RoundedCornerShape(16.dp))
+                        .onSizeChanged { trackWidthPx = it.width.toFloat() }
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(0.28f)
+                            .graphicsLayer {
+                                translationX = trackWidthPx * (shimmerProgress - 0.14f)
+                            }
+                            .background(
+                                Brush.horizontalGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        Color.White.copy(alpha = 0.14f),
+                                        Color.Transparent
+                                    )
                                 )
-                            ),
-                            size = size.copy(width = bandWidth)
-                        )
-                    }
+                            )
+                    )
                 }
             }
+        }
+    }
+}
+
+// 「今日新低」公告胶囊：状态胶囊行右侧的买入信号入口，与状态胶囊同语言（圆角 50 + 发丝边）。
+// 三态——无新低：白底灰字（存在但不吵）；有新低：SoftGreen 底、绿数字；
+// 过滤激活：FreshGreen 粗描边（一眼看出"列表正在过滤"）。末尾 › 是明确的可点暗示
+@Composable
+private fun NewLowBadge(
+    count: Int,
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val hasNew = count > 0
+    val animatedCount by animateIntAsState(
+        targetValue = count,
+        animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing),
+        label = "newlow-count"
+    )
+    val containerColor by animateColorAsState(
+        targetValue = if (hasNew) SoftGreen else CardWhite,
+        animationSpec = tween(durationMillis = 250),
+        label = "newlow-bg"
+    )
+    val valueColor = if (hasNew) FreshGreen else TextSecondary
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(containerColor)
+            .border(
+                width = if (active) 1.5.dp else 1.dp,
+                color = if (active) FreshGreen else HairlineBorder,
+                shape = RoundedCornerShape(50)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "今日新低",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = TextSecondary
+        )
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(
+            text = "$animatedCount",
+            fontSize = 15.sp,
+            fontFamily = SerifItalic,
+            fontWeight = FontWeight.Bold,
+            color = valueColor
+        )
+        Spacer(modifier = Modifier.width(1.dp))
+        Text(
+            text = "件",
+            style = MaterialTheme.typography.labelSmall,
+            color = valueColor
+        )
+        Spacer(modifier = Modifier.width(3.dp))
+        // Canvas 自绘 ›（与价格行 chevron 同画法，项目不引图标库）
+        Canvas(modifier = Modifier.size(11.dp)) {
+            val stroke = 1.3.dp.toPx()
+            val w = size.width
+            val h = size.height
+            val cx = w * 0.6f
+            val cy = h * 0.5f
+            val dx = w * 0.22f
+            val dy = h * 0.28f
+            drawLine(valueColor, Offset(cx - dx, cy - dy), Offset(cx, cy), stroke, StrokeCap.Round)
+            drawLine(valueColor, Offset(cx, cy), Offset(cx - dx, cy + dy), stroke, StrokeCap.Round)
         }
     }
 }
@@ -1679,85 +1792,18 @@ private fun ScreenshotViewer(
 }
 
 @Composable
-private fun StatCards(
-    todayCount: Int,
-    productCount: Int,
-    updatedCount: Int
-) {
-    // 去卡片化：用大数字 + 细分割线撑起层次，不再用圆角白卡容器
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        StatColumn(title = "今日记录", value = todayCount, accent = true)
-        StatDivider()
-        StatColumn(title = "在记商品", value = productCount)
-        StatDivider()
-        StatColumn(title = "有价格变动", value = updatedCount)
-    }
-}
-
-@Composable
-private fun StatDivider() {
-    Box(
-        modifier = Modifier
-            .width(1.dp)
-            .height(26.dp)
-            .background(Color(0xFFEFEFF2))
-    )
-}
-
-@Composable
-private fun RowScope.StatColumn(title: String, value: Int, accent: Boolean = false) {
-    // 数字变化时滚动过渡，而不是生硬跳变
-    val animatedValue by animateIntAsState(
-        targetValue = value,
-        animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing),
-        label = "stat-$title"
-    )
-    Column(
-        modifier = Modifier.weight(1f),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.labelSmall,
-            color = TextSecondary
-        )
-        Spacer(modifier = Modifier.height(5.dp))
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = "$animatedValue",
-                fontSize = 22.sp,
-                fontFamily = SerifItalic,
-                fontWeight = FontWeight.Bold,
-                color = if (accent) BrandRed else TextPrimary
-            )
-            Spacer(modifier = Modifier.width(2.dp))
-            Text(
-                text = "件",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = if (accent) BrandRed else TextSecondary,
-                modifier = Modifier.padding(bottom = 2.dp)
-            )
-        }
-    }
-}
-
-@Composable
 private fun SearchBox(
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit
 ) {
-    // 内联化搜索：浅灰圆底 + 无边框，视觉更轻，贴合 Apple 风格
+    // 白底 + 0.6dp 发丝边（项目设计语言：底色差+描边两级区分）——原先浅灰底 F2F2F4
+    // 与页面背景 F1F1F4 每通道仅差 1，视觉上等于隐形（用户反馈"不明显"）
     val focusManager = LocalFocusManager.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFFF2F2F4), RoundedCornerShape(13.dp))
+            .background(CardWhite, RoundedCornerShape(13.dp))
+            .border(0.6.dp, HairlineBorder, RoundedCornerShape(13.dp))
             .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
         BasicTextField(
@@ -1780,6 +1826,27 @@ private fun SearchBox(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 自绘放大镜（圆 + 斜柄）：搜索意图的通用符号，项目不引图标库
+                    Canvas(modifier = Modifier.size(16.dp)) {
+                        val stroke = 1.6.dp.toPx()
+                        val r = size.minDimension * 0.3f
+                        val cx = size.width * 0.42f
+                        val cy = size.height * 0.42f
+                        drawCircle(
+                            color = TextSecondary,
+                            radius = r,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = stroke, cap = StrokeCap.Round)
+                        )
+                        drawLine(
+                            color = TextSecondary,
+                            start = Offset(cx + r * 0.72f, cy + r * 0.72f),
+                            end = Offset(cx + r * 1.55f, cy + r * 1.55f),
+                            strokeWidth = stroke,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(9.dp))
                     Box(modifier = Modifier.weight(1f)) {
                         if (searchQuery.isEmpty()) {
                             Text(
@@ -1818,12 +1885,113 @@ private fun SearchBox(
     }
 }
 
+// 方向锁定的左滑删除（替代 SwipeToDismissBox）：系统控件的手势判定只看横轴、完全无视纵轴，
+// 竖滑列表时手指的横向漂移会被抢成左滑——红底纹莫名闪现甚至弹删除确认框。
+// 这里先判主轴：累计位移过触点阈值时，横向须压过纵向 1.2 倍且朝左才接管（此后消费事件，
+// 列表不再滚动）；否则立即让位，把整串手势放行给 LazyColumn。
+// 触发确认为「拖过固定 96dp」（卡半宽在宽屏上要拉一大段，太费劲），窄卡片时回退半宽防误触；
+// 原实现快速轻甩也能过速度阈值，现在必须实打实拖到位。
+// 拖拽位移只在 offset{} 与 graphicsLayer{} 里读取（placement/draw 阶段），逐帧拖动零重组；
+// pastThreshold 只在跨过/退回门槛时翻转一次，红底淡入淡出走 animateFloatAsState。
+@Composable
+private fun DirectionalSwipeToDelete(
+    enabled: Boolean,
+    onDismissRequest: () -> Unit,
+    background: @Composable () -> Unit,
+    content: @Composable () -> Unit
+) {
+    var swipeOffset by remember { mutableFloatStateOf(0f) }
+    var pastThreshold by remember { mutableStateOf(false) }
+    var widthPx by remember { mutableFloatStateOf(0f) }
+    val revealAlpha by animateFloatAsState(
+        targetValue = if (pastThreshold) 1f else 0f,
+        animationSpec = tween(durationMillis = 180),
+        label = "delete-reveal"
+    )
+    val scope = rememberCoroutineScope()
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        // 删除底纹：只有拖过触发线（"打算删除"）才淡入，轻滑露出的缝隙里是页面底色
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .graphicsLayer { alpha = revealAlpha }
+        ) {
+            background()
+        }
+        Box(
+            modifier = Modifier
+                .onSizeChanged { widthPx = it.width.toFloat() }
+                .offset { IntOffset(swipeOffset.roundToInt(), 0) }
+                .pointerInput(enabled, widthPx) {
+                    if (!enabled || widthPx <= 0f) {
+                        swipeOffset = 0f
+                        pastThreshold = false
+                        return@pointerInput
+                    }
+                    val slop = viewConfiguration.touchSlop
+                    // 固定触发线 96dp：大约四分之一屏宽，比半宽省一大截；窄卡片时退回半宽
+                    val trigger = min(96.dp.toPx(), widthPx * 0.5f)
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var totalDx = 0f
+                        var totalDy = 0f
+                        var horizontal = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            val delta = change.positionChange()
+                            if (!horizontal) {
+                                // 主轴未定时事件若已被深层节点消费（比价长按拖拽等），直接让位
+                                if (change.isConsumed) break
+                                totalDx += delta.x
+                                totalDy += delta.y
+                                val adx = abs(totalDx)
+                                val ady = abs(totalDy)
+                                if (max(adx, ady) >= slop) {
+                                    horizontal = totalDx < 0f && adx > ady * 1.2f
+                                    if (!horizontal) break
+                                }
+                            }
+                            if (horizontal) {
+                                swipeOffset = (swipeOffset + delta.x).coerceIn(-widthPx, 0f)
+                                pastThreshold = -swipeOffset > trigger
+                                change.consume()
+                            }
+                            if (!change.pressed) {
+                                if (horizontal && -swipeOffset > trigger) {
+                                    onDismissRequest()
+                                }
+                                if (horizontal) {
+                                    val start = swipeOffset
+                                    scope.launch {
+                                        animate(
+                                            initialValue = start,
+                                            targetValue = 0f,
+                                            animationSpec = spring(
+                                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                                stiffness = Spring.StiffnessMediumLow
+                                            )
+                                        ) { v, _ -> swipeOffset = v }
+                                        pastThreshold = false
+                                    }
+                                }
+                                break
+                            }
+                        }
+                    }
+                }
+        ) {
+            content()
+        }
+    }
+}
+
 @Composable
 private fun SectionHeader(
-    fullScreenList: Boolean,
+    newLowFilterActive: Boolean,
     filteredCount: Int,
     totalCount: Int,
-    onToggleFullScreen: () -> Unit,
     onClearHistory: () -> Unit
 ) {
     Row(
@@ -1834,11 +2002,11 @@ private fun SectionHeader(
             modifier = Modifier
                 .width(3.5.dp)
                 .height(15.dp)
-                .background(BrandRed, RoundedCornerShape(2.dp))
+                .background(if (newLowFilterActive) FreshGreen else BrandRed, RoundedCornerShape(2.dp))
         )
         Spacer(modifier = Modifier.width(7.dp))
         Text(
-            text = if (fullScreenList) "全部商品" else "最近扫描",
+            text = if (newLowFilterActive) "今日新低" else "最近扫描",
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             color = TextPrimary
@@ -1850,12 +2018,6 @@ private fun SectionHeader(
             color = TextSecondary
         )
         Spacer(modifier = Modifier.weight(1f))
-        TextButton(onClick = onToggleFullScreen) {
-            Text(
-                text = if (fullScreenList) "退出全屏" else "全屏查看",
-                color = TextSecondary
-            )
-        }
         TextButton(onClick = onClearHistory) {
             Text("清空", color = TextSecondary)
         }
@@ -1863,14 +2025,35 @@ private fun SectionHeader(
 }
 
 @Composable
-private fun EmptyState(searchQuery: String) {
+private fun EmptyState(searchQuery: String, newLowFilterActive: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = CardWhite),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        if (searchQuery.isBlank()) {
+        if (newLowFilterActive) {
+            // 新低过滤激活但没货：给出退出指引，别让用户卡在空列表里找不到商品
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "今日暂无新低商品",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "再点一次「今日新低」退出过滤",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
+        } else if (searchQuery.isBlank()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2026,16 +2209,22 @@ private fun ProductCard(
     var viewingShot by remember { mutableStateOf<ProductPriceHistory?>(null) }
     // 径向菜单控制器：pointerInput(Unit) 的手势协程不会随重组重启，用最新引用接住
     val currentCompare by rememberUpdatedState(compare)
-    // 手势上报 root 坐标的锚点：pointerInput 局部坐标 + 本节点在 root 中的位置
-    var headerPosInRoot by remember { mutableStateOf(Offset.Zero) }
+    // 同理：手势协程捕获的是首帧 item，同步/识别更新后（ProductPrice 是新实例）
+    // 长按复制到的仍是旧标题
+    val currentItem by rememberUpdatedState(item)
+    // 手势上报 root 坐标的锚点：存 LayoutCoordinates 引用而非每帧计算的位置值。
+    // 滚动时卡片位置逐帧变化，写位置会让 snapshot 系统每帧收 N 次变更通知；
+    // 存引用（对象不变，state 写入短路不通知），手势触发时才实时取坐标
+    var headerCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val history by viewModel.historyFor(item.id).collectAsState()
     // 截图存档存在性（IO 线程一次目录列举），给点图回放挑最便宜截图用
     val shotIds by produceState<Set<Long>>(emptySet(), viewModel.screenshotStore, history) {
         value = viewModel.screenshotStore.existingShotIds()
     }
-    val minPrice = history.minOfOrNull { it.priceCents } ?: item.priceCents
+    // 派生值 remember 化：history 引用不变就不重算（press/动画等无关重组不重复遍历）
+    val minPrice = remember(history, item.priceCents) { history.minOfOrNull { it.priceCents } ?: item.priceCents }
     val isAtLowest = item.priceCents <= minPrice
-    val previousPrice = if (history.size >= 2) history[history.lastIndex - 1].priceCents else null
+    val previousPrice = remember(history) { if (history.size >= 2) history[history.lastIndex - 1].priceCents else null }
     val isDowngrade = previousPrice != null && item.priceCents < previousPrice
     // 关键买入信号：当前已是历史最低，且比上次还便宜 → 卡片渲染淡绿色光晕
     val showBuyGlow = isAtLowest && isDowngrade
@@ -2071,7 +2260,7 @@ private fun ProductCard(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onGloballyPositioned { headerPosInRoot = it.positionInRoot() }
+                    .onGloballyPositioned { headerCoords = it }
                     .graphicsLayer {
                         scaleX = pressScale
                         scaleY = pressScale
@@ -2104,11 +2293,13 @@ private fun ProductCard(
                                 detectDragGesturesAfterLongPress(
                                     onDragStart = { offset ->
                                         val ctrl = currentCompare ?: return@detectDragGesturesAfterLongPress
+                                        val origin = headerCoords?.positionInRoot() ?: return@detectDragGesturesAfterLongPress
                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        ctrl.onOpen(item, headerPosInRoot + offset)
+                                        ctrl.onOpen(currentItem, origin + offset)
                                     },
                                     onDrag = { change, _ ->
-                                        currentCompare?.onDrag(headerPosInRoot + change.position)
+                                        val origin = headerCoords?.positionInRoot() ?: return@detectDragGesturesAfterLongPress
+                                        currentCompare?.onDrag(origin + change.position)
                                     },
                                     onDragEnd = { currentCompare?.onRelease() },
                                     onDragCancel = { currentCompare?.onCancel() }
@@ -2212,7 +2403,7 @@ private fun ProductCard(
                         text = if (deviceCount > 1) {
                             "${history.size} 条 · ${deviceCount} 台设备"
                         } else {
-                            "${history.size} 条 · ${shortTime(item.updatedAt)}"
+                            "${history.size} 条 · ${cardTime(item.updatedAt)}"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = TextSecondary
@@ -2296,7 +2487,6 @@ private class CompareMenuState(
 }
 
 private class CompareMenuController(
-    val apps: List<CompareApp>,
     val onOpen: (ProductPrice, Offset) -> Unit,
     val onDrag: (Offset) -> Unit,
     val onRelease: () -> Unit,
@@ -2393,7 +2583,7 @@ private fun CompareMenuOverlay(state: CompareMenuState, rootSize: IntSize) {
             ),
             label = "compare-pulse"
         )
-        Canvas(
+        Box(
             modifier = Modifier
                 .offset {
                     IntOffset(
@@ -2403,8 +2593,26 @@ private fun CompareMenuOverlay(state: CompareMenuState, rootSize: IntSize) {
                 }
                 .size(28.dp)
         ) {
-            drawCircle(BrandRed.copy(alpha = 0.28f), radius = 7.dp.toPx() * pulse)
-            drawCircle(BrandRed, radius = 4.dp.toPx())
+            // 呼吸光环：静态圆 + layer 缩放（pulse 只改 layer 属性，不重录 display list）
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(14.dp)
+                    .graphicsLayer {
+                        scaleX = pulse
+                        scaleY = pulse
+                        alpha = 0.28f
+                    }
+                    .clip(CircleShape)
+                    .background(BrandRed)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(BrandRed)
+            )
         }
         var captionSize by remember { mutableStateOf(IntSize.Zero) }
         Text(
@@ -2850,15 +3058,21 @@ private fun LowestBadge() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 圆点脉动：强调"现在就是最低"这个关键信号。
-            // 脉动值只在 Canvas 绘制块里读取——仅失效 draw 阶段，不触发重组/重排，
-            // 否则每个徽章 60fps 持续重组会在滑动列表时挤爆帧预算（滚动卡顿根因）
-            Canvas(modifier = Modifier.size(6.dp)) {
-                val scale = 0.75f + 0.4f * pulse
-                drawCircle(
-                    color = FreshGreen.copy(alpha = 0.5f + 0.5f * pulse),
-                    radius = size.minDimension / 2f * scale
-                )
-            }
+            // 预绘制静态圆 + 动画只改 layer 属性（alpha/scale）：Canvas 读动画值会让整个区域
+            // 每帧重录 display list，每张最低价徽章 60/120fps 持续重绘，滚动时挤爆帧预算；
+            // layer 属性更新走 RenderNode 合成路径，不重录不重新光栅化，滚动时几乎零成本
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .graphicsLayer {
+                        val s = 0.75f + 0.4f * pulse
+                        scaleX = s
+                        scaleY = s
+                        alpha = 0.5f + 0.5f * pulse
+                    }
+                    .clip(CircleShape)
+                    .background(FreshGreen)
+            )
             Spacer(modifier = Modifier.width(5.dp))
         Text(
             text = "历史最低",
@@ -3251,9 +3465,9 @@ private fun PriceLineChart(
                 ) {
                     Text(
                         text = if (who != null) {
-                            "$who · ${chartDateTime(rec.recordedAt)}"
+                            "$who · ${cardTime(rec.recordedAt)}"
                         } else {
-                            chartDateTime(rec.recordedAt)
+                            cardTime(rec.recordedAt)
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary
@@ -3577,7 +3791,8 @@ private val fullTimeFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)
 private val clockFormat = SimpleDateFormat("HH:mm", Locale.CHINA)
 private val dayFormat = SimpleDateFormat("M/d", Locale.CHINA)
 private val dayTimeFormat = SimpleDateFormat("M/d HH:mm", Locale.CHINA)
-private val todayKeyFormat = SimpleDateFormat("yyyyMMdd", Locale.CHINA)
+private val yearDayTimeFormat = SimpleDateFormat("yyyy/M/d HH:mm", Locale.CHINA)
+private val yearKeyFormat = SimpleDateFormat("yyyy", Locale.CHINA)
 
 private fun formatTime(timeMillis: Long): String =
     fullTimeFormat.format(Date(timeMillis))
@@ -3585,14 +3800,16 @@ private fun formatTime(timeMillis: Long): String =
 private fun shortTime(timeMillis: Long): String =
     clockFormat.format(Date(timeMillis))
 
+// 卡片角落的更新时间：当年记录省年份（"9/7 14:32"），跨年才补全（"2025/12/30 09:15"）
+private fun cardTime(timeMillis: Long): String =
+    if (yearKeyFormat.format(Date(timeMillis)) == yearKeyFormat.format(Date())) {
+        dayTimeFormat.format(Date(timeMillis))
+    } else {
+        yearDayTimeFormat.format(Date(timeMillis))
+    }
+
 private fun chartDate(timeMillis: Long): String =
     dayFormat.format(Date(timeMillis))
-
-private fun chartDateTime(timeMillis: Long): String =
-    dayTimeFormat.format(Date(timeMillis))
-
-private fun isToday(timeMillis: Long): Boolean =
-    todayKeyFormat.format(Date(timeMillis)) == todayKeyFormat.format(Date())
 
 private fun normalizeSearchText(text: String): String =
     text.lowercase()
