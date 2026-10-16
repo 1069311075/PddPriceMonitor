@@ -60,6 +60,18 @@ class OcrDumpWriter @Inject constructor(
                         .put("light", round4(line.lightRatio))
                         .put("red", round4(line.redRatio))
                         .put("green", round4(line.greenRatio))
+                        .put("elements", JSONArray().apply {
+                            line.elements.forEach { el ->
+                                put(
+                                    JSONObject()
+                                        .put("text", el.text)
+                                        .put("left", el.left)
+                                        .put("top", el.top)
+                                        .put("right", el.right)
+                                        .put("bottom", el.bottom)
+                                )
+                            }
+                        })
                 )
             }
         }

@@ -16,8 +16,8 @@ android {
         applicationId = "com.example.pddpricemonitor"
         minSdk = 29
         targetSdk = 34
-        versionCode = 117
-        versionName = "0.11.88"
+        versionCode = 118
+        versionName = "0.11.89"
     }
 
     buildFeatures {

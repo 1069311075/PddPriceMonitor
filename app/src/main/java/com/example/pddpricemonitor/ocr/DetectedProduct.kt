@@ -32,5 +32,18 @@ data class OcrLineDump(
     val redRatio: Double,
     val greenRatio: Double,
     val screenHeight: Int,
-    val screenWidth: Int
+    val screenWidth: Int,
+    // 行内词块（elements）：底栏价格的词块定位路径（¥ 锚点后取主数字+小数位）依赖
+    // 词块矩形，行文本丢 ¥/小数点时词块路径仍能出价。旧 dump 无此字段（空表），
+    // 回放时退化为纯文本路径（KNOWN_ELEMENT_LOSS 白名单的来源）
+    val elements: List<OcrElementDump> = emptyList()
+)
+
+// 词块级数据：文本 + 坐标（颜色比例按行记录，词块不重复采样）
+data class OcrElementDump(
+    val text: String,
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int
 )

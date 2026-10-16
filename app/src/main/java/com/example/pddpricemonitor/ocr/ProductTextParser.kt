@@ -103,7 +103,11 @@ class ProductTextParser {
             "\\u76F4\\u64AD|\\u5206\\u671F|\\u4F4E\\u81F3|\\u5E73\\u53F0\\u5238|" +
             "\\u53C2\\u6570|\\u9891\\u7387|mhz|gbps|gddr|\\u4F4D\\u5BBD|\\u7535\\u6E90|" +
             "\\u8BC4\\u4EF7\\u8BE5\\u54C1\\u724C\\u5546\\u54C1|\\u70ED\\u9500\\u77E5\\u540D\\u54C1\\u724C|" +
-            "\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500|\\u5546\\u54C1\\u8BE6\\u60C5)",
+            // 优惠券横幅行（「8元无门槛关注券|即将恢复7180元起」）会抢走真标题（Art Master
+            // 音响页实测：横幅行的位置/字号都像标题块）。关注券/无门槛只出现在券横幅里，
+            // 商品标题不可能含这两个词
+            "\\u8BE5\\u54C1\\u724C\\u7D2F\\u8BA1\\u70ED\\u9500|\\u5546\\u54C1\\u8BE6\\u60C5|" +
+            "\\u65E0\\u95E8\\u69DB|\\u5173\\u6CE8\\u5238)",
         RegexOption.IGNORE_CASE
     )
     private val titleNoiseRegex = Regex(
@@ -206,6 +210,18 @@ class ProductTextParser {
     private val whitespaceRegex = Regex("\\s+")
     private val compactTitleRegex = Regex("[^\\p{IsHan}a-z0-9]+")
 
+    // ---- 价格量级护栏的参照信号：页面自带的价格上限（即将恢复/优惠前/原拼单价）
+    // 与补贴金额，从整页行文本提取 ----
+    private val priceRestoreRefRegex = Regex("即将恢复\\s*([0-9]+(?:[.,][0-9]{1,2})?)\\s*元")
+    private val pricePreDiscountRefRegex = Regex("优惠前\\s*[¥￥]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)")
+    private val priceOriginalGroupRefRegex = Regex("原拼单价\\s*[¥￥]?\\s*([0-9]+(?:[.,][0-9]{1,2})?)")
+    private val priceSubsidyRefRegex = Regex(
+        "(?:官方|政府)(?:狂)?[补朴][贴貼貼]?\\s*(?:下单)?\\s*(?:立减)?\\s*([0-9]+(?:[.,][0-9]{1,2})?)\\s*元"
+    )
+    // 评价页固定文案：「该商品所属品牌评价(N)」「该商品所属店铺评价」。评价文本行
+    // 会伪装成黑体长标题（「包装很好份量很足」），商品详情页不含该短语，见词整页拒绝
+    private val reviewPageSignalRegex = Regex("该商品所属")
+
     fun parse(text: Text, bitmap: Bitmap? = null): List<DetectedProduct> {
         val result = parseWithReason(text, bitmap)
         return result.products
@@ -240,7 +256,10 @@ class ProductTextParser {
         redRatio = redRatio,
         greenRatio = greenRatio,
         screenHeight = screenHeight,
-        screenWidth = screenWidth
+        screenWidth = screenWidth,
+        elements = elements.map {
+            OcrElementDump(it.text, it.rect.left, it.rect.top, it.rect.right, it.rect.bottom)
+        }
     )
 
     private fun flattenLines(text: Text, bitmap: Bitmap?): List<OcrLine> =
@@ -277,7 +296,70 @@ class ProductTextParser {
     )
 
     private fun parseDetailProduct(lines: List<OcrLine>): DetailParse? {
-        return parseByBlackTitle(lines) ?: parseByMainPriceBand(lines)?.let { DetailParse(it, null) }
+        if (lines.any { reviewPageSignalRegex.containsMatchIn(it.text) }) return null
+        val detail = parseByBlackTitle(lines)
+            ?: parseByMainPriceBand(lines)?.let { DetailParse(it, null) }
+            ?: return null
+        val guardedCents = guardPriceMagnitude(lines, detail.product.priceCents) ?: return detail
+        return detail.copy(product = detail.product.copy(priceCents = guardedCents))
+    }
+
+    // 价格量级护栏：两遍 OCR 都丢小数点时，入库价可偏离 10-100 倍（椰青页底栏
+    // 「补贴价¥7877」实为 ¥78.77，放大重读又读成 ¥787——两遍自身无法互证）。
+    // 页面参照信号做第三方仲裁：即将恢复/优惠前/原拼单价给出价格上限 R（划线价
+    // 恒 ≥ 现价），官方补贴金额 S 限定现价区间（补贴/现价在 5%-90% 才合理）。
+    // 读数越界时在原数字串的全部小数点移位候选里挑回界内者；无幸存候选则不动。
+    // 50 份真机 dump 重放验证：仅纠正两个已知错价（787.00→78.77、884.00→88.40），零误伤。
+    // 挂在一遍层：修正后的价带真实小数（cents%100≠0），refinePrice 的 firstHasDecimal
+    // 裁决会自动拒绝二遍无小数点候选，护栏修正被二遍尊重
+    private fun guardPriceMagnitude(lines: List<OcrLine>, cents: Long): Long? {
+        if (cents <= 0) return null
+        val text = lines.joinToString(" || ") { it.text }
+        val reference = (
+            priceRestoreRefRegex.findAll(text).mapNotNull { yuanToCents(it.groupValues[1]) } +
+                pricePreDiscountRefRegex.findAll(text).mapNotNull { yuanToCents(it.groupValues[1]) } +
+                priceOriginalGroupRefRegex.findAll(text).mapNotNull { yuanToCents(it.groupValues[1]) }
+            ).minOrNull()
+        val subsidy = priceSubsidyRefRegex.findAll(text)
+            .mapNotNull { yuanToCents(it.groupValues[1]) }
+            .maxOrNull()
+
+        val tooBig = reference != null && cents > reference
+        val tooSmall = subsidy != null && subsidy >= cents * 2
+        val subsidyAbsurd = subsidy != null && subsidy.toDouble() / cents < 0.02
+        if (!tooBig && !tooSmall && !subsidyAbsurd) return null
+
+        val survivors = decimalShiftCandidates(cents).filter { candidate ->
+            if (reference != null && candidate > reference) return@filter false
+            if (subsidy != null) {
+                val ratio = if (candidate > 0) subsidy.toDouble() / candidate else 99.0
+                if (ratio < 0.05 || ratio > 0.9) return@filter false
+            }
+            true
+        }
+        val pick = if (tooSmall) survivors.minOrNull() else survivors.maxOrNull()
+        return pick?.takeIf { it != cents }
+    }
+
+    // cents 数字串的全位置小数点移位候选 + 自身。cents 恒为「分」，末尾 00 剥掉后再
+    // 插点（787700 → "7877" → {7.877, 78.77, 787.7, 7877}），与回放侧 guard_sim 一致
+    private fun decimalShiftCandidates(cents: Long): List<Long> {
+        var digits = cents.toString()
+        if (digits.endsWith("00")) {
+            digits = digits.dropLast(2).ifEmpty { digits }
+        }
+        val out = mutableSetOf(cents)
+        for (i in 1 until digits.length) {
+            yuanToCents(digits.substring(0, i) + "." + digits.substring(i))?.let { out += it }
+        }
+        return out.toList()
+    }
+
+    private fun yuanToCents(text: String): Long? {
+        val parts = text.replace(',', '.').split('.')
+        val yuan = parts.firstOrNull()?.toLongOrNull() ?: return null
+        val fraction = (parts.getOrNull(1) ?: "").padEnd(2, '0').take(2)
+        return yuan * 100 + (fraction.toLongOrNull() ?: 0L)
     }
 
     private fun parseByBlackTitle(lines: List<OcrLine>): DetailParse? {
@@ -730,7 +812,14 @@ class ProductTextParser {
             text.contains('\u3010') ||
                 productSignalRegex.containsMatchIn(text)
 
-        return hasProductSignal && normalizeTitle(text).length >= 10
+        if (hasProductSignal && normalizeTitle(text).length >= 10) return true
+
+        // 徽章在行首时按 normalizeDisplayTitle 同款前缀剥离规则去除徽章，余下正文
+        // 仍 ≥10 字的是「带店徽章前缀的标题行」：券横幅页的真标题（「旗舰店 Art
+        // Master术大师…黑胶唱片」）行首的旗舰店徽章被 OCR 并入标题行；纯店铺行
+        // （「官方旗舰」「官方旗舰晒单享三位红包」）剥完所剩不足 10 字
+        val remainder = text.replace(leadingTitleBadgeRegex, "")
+        return normalizeTitle(remainder).length >= 10
     }
 
     private fun isStructuredTitleLine(line: OcrLine): Boolean =

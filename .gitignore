@@ -9,7 +9,9 @@ app/build/
 # 本地工作目录：APK 产物、OCR 调试数据、设计原型，不入库（分发走 Release）
 dist/
 ocr_dumps_local/
+shots_local/
 replay/
 ball-shapes/
 .kotlin/
 .trae-html-share-packages/
+replay/src/main/kotlin/com/example/pddpricemonitor/replay/Scenarios.kt
