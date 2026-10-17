@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.example.pddpricemonitor.R
 import com.example.pddpricemonitor.data.ScreenshotStore
@@ -18,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
@@ -39,8 +41,13 @@ class ScreenCaptureService : Service() {
     @Inject
     lateinit var screenshotStore: ScreenshotStore
 
+    // 下段按钮的截图存档：独立目录、独立记录，不碰 OCR 附表与价格库
+    @Inject
+    lateinit var hdCaptureInteractor: HdCaptureInteractor
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var worker: Job? = null
+    private var hdWorker: Job? = null
 
     private var projectionController: MediaProjectionController? = null
     private var overlayController: FloatingOverlayController? = null
@@ -98,6 +105,8 @@ class ScreenCaptureService : Service() {
 
     private fun captureOnce() {
         if (worker?.isActive == true) return
+        // 截图进行中（正在隐藏控件取新帧）：不与其抢窗口和帧，等服务侧任务收尾
+        if (hdWorker?.isActive == true) return
         val controller = projectionController ?: return
         // 结果面板还开着时再点球 = 「重新识别」语义：上一条未确认的自动保存视为作废；
         // 面板已自动收起则属「隐式落账」后的新一轮识别，不动旧数据。
@@ -172,6 +181,66 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    /**
+     * 下段按钮：一键保存当前画面截图（长边压到上限、JPEG q85）。
+     * 与 OCR 完全解耦——不识别、不写价格库、不碰待确认自动保存行，也不受「保存识别截图」开关影响。
+     * 流程：隐藏本软件悬浮控件与结果面板 → 取一张隐藏之后的新帧 → 缩放编码落独立目录 → 恢复控件。
+     */
+    private fun captureHdOnce() {
+        if (hdWorker?.isActive == true) return
+        val controller = projectionController
+        if (controller == null) {
+            notifyUser("录屏服务未启动，请先点悬浮球启动")
+            return
+        }
+        // 与 OCR 识别共用采集互斥：识别中不抢帧、不抢窗口隐藏
+        if (worker?.isActive == true) {
+            notifyUser("正在识别，稍后再截图")
+            return
+        }
+
+        hdWorker = scope.launch {
+            // 基准时间戳与隐藏动作取在同一主线程帧：先取时间再隐藏，
+            // 「隐藏控件触发的新帧」时间戳必晚于基准，旧帧会被 acquireFreshFrame 过滤掉
+            val sinceNanos = withContext(Dispatchers.Main) {
+                val stamp = System.nanoTime()
+                overlayController?.hideForCapture()
+                stamp
+            }
+            val result = try {
+                hdCaptureInteractor.capture(sinceNanos) { baseline ->
+                    controller.acquireFreshFrame(baseline)
+                }
+            } catch (error: Throwable) {
+                HdCaptureInteractor.Result.Failure("截图失败：${error.javaClass.simpleName}")
+            } finally {
+                // 成功、失败、取消都在 finally 恢复控件：面板原样回来并重新计时自动收起
+                withContext(Dispatchers.Main) { overlayController?.restoreAfterCapture() }
+            }
+
+            val message = when (result) {
+                is HdCaptureInteractor.Result.Success -> "截图已保存"
+                is HdCaptureInteractor.Result.Failure -> result.reason
+            }
+            MonitorDebugState.update(message)
+            withContext(Dispatchers.Main) { notifyUser(message) }
+        }
+    }
+
+    /**
+     * 用户反馈提示：优先走自有悬浮窗气泡。MIUI/HyperOS 会因应用通知权限静默抑制文本 Toast
+     * （logcat: Suppressing toast from package ... by user request），只靠 Toast 等于不提示；
+     * 悬浮窗不可用（未授权/已摘）时才退回系统 Toast 兜底。必须主线程调用。
+     */
+    private fun notifyUser(message: String) {
+        val overlay = overlayController
+        if (overlay != null && overlay.isShowing) {
+            overlay.showHint(message)
+        } else {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun autoSaveEnabled(): Boolean = CapturePrefs.isAutoSaveEnabled(this)
 
     // 最近一次「识别后自动保存」、尚未经用户确认的历史行 id：
@@ -228,6 +297,10 @@ class ScreenCaptureService : Service() {
                 callbacks = object : FloatingOverlayController.Callbacks {
                     override fun onCaptureClick() {
                         captureOnce()
+                    }
+
+                    override fun onHdCaptureClick() {
+                        captureHdOnce()
                     }
 
                     override fun onSaveClick(title: String, priceCents: Long, ocrTitle: String) {
@@ -291,6 +364,7 @@ class ScreenCaptureService : Service() {
     override fun onDestroy() {
         isRunning = false
         worker?.cancel()
+        hdWorker?.cancel()
         overlayController?.destroy()
         overlayController = null
         projectionController?.release()

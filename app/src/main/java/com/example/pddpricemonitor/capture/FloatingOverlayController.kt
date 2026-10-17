@@ -9,23 +9,21 @@ import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
-import android.graphics.LinearGradient
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
-import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
@@ -36,7 +34,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import kotlin.math.min
 import com.example.pddpricemonitor.R
 import com.example.pddpricemonitor.compare.ClipRelayActivity
 import com.example.pddpricemonitor.compare.CompareApps
@@ -57,7 +54,6 @@ import android.provider.Settings
 // 「清爽红」设计系统：与主界面保持一致，取拼多多品牌红做记忆点
 private val BrandRed = Color.parseColor("#E02E24")
 private val BrandRedSoft = Color.parseColor("#FFF1F0")
-private val InkColor = Color.parseColor("#2E3338")
 private val FreshGreen = Color.parseColor("#1DC981")
 private val SoftGreen = Color.parseColor("#E9F9F1")
 private val CardWhite = Color.WHITE
@@ -65,164 +61,226 @@ private val TextPrimary = Color.parseColor("#1A1A1A")
 private val TextSecondary = Color.parseColor("#8A8F99")
 private val HairlineBorder = Color.parseColor("#1A1A1A1A")
 
+// 一体双段「圆角方柱」按钮配色：白壳 + 上段浅灰扫描（深色图标）+ 下段淡红相机（红色图标）
+private val ScanIdleBg = Color.parseColor("#F4F4F6")
+private val ScanScanBg = Color.parseColor("#FDEBEA")
+private val ScanOkBg = Color.parseColor("#E9F9F1")
+private val ScanErrBg = Color.parseColor("#EDEDF0")
+private val ScanIconInk = Color.parseColor("#242429")
+private val CamIdleBg = Color.parseColor("#FDEFEE")
+private val CamIconRed = Color.parseColor("#E63B35")
+private val DividerColor = Color.parseColor("#E2E2E7")
+private val PressTint = Color.parseColor("#14000000")
+
+/** 双段按钮的两块按压区（整块外壳的空白、中缝、外边距都不属于任何一段） */
+private enum class ColumnSegment { TOP, BOTTOM }
+
 /**
- * 边签：从屏幕边缘"长出来"的竖向小签——
- * ① 磨砂玻璃签体（垂直渐变半透明白，内侧圆角大、贴边侧圆角小）
- * ② 居中握柄（唯一着色元素，颜色即状态：待机墨 / 识别红 / 成功绿 / 失败灰）
- * ③ 识别光晕（沿签体轮廓向外扩散的红环，随 pulse 呼吸）
- * 签体贴边侧无 margin（签体压在屏幕边缘上，像从边缘长出来），内侧/上下留 margin 供光晕扩散；贴哪条边由 onRight 决定（圆角朝屏内）。
+ * 一体双段「圆角方柱」：白色圆角矩形外壳，上下两块等大按压区，中缝一条细分隔线。
+ * 上段浅灰底扫描图标＝原有识别；下段淡红底相机图标＝截图。
+ * 命中判定只认两段内部矩形——外壳空白、中缝细线、透明外边距都不会被当成功能按钮；
+ * 但整块窗口（含空白与边距）都可拖动。
  */
-private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Drawable() {
+private class RoundedColumnDrawable(
+    private val marginPx: Int,
+    private val segSizePx: Int,
+    private val shellPadPx: Int,
+    private val segGapPx: Int,
+    private val shellRadiusPx: Float,
+    private val segRadiusPx: Float,
+    private val iconPx: Int,
+    private val density: Float
+) : Drawable() {
 
-    private var accent = initialColor
-    private var pressed = false
-    private var onRight = true
-    private var pulse = 0f
-    private var glowLevel = 0f
-
-    // 挂着识别卡片时握柄拉长，表示"签连着卡"
-    var gripExtend = 0f
+    var scanBg: Int = ScanIdleBg
         set(value) {
             if (field == value) return
             field = value
             invalidateSelf()
         }
 
-    private val bodyPath = Path()
-    private val glowPath = Path()
-    private val bodyRect = RectF()
-    private val glowRect = RectF()
+    var scanFg: Int = ScanIconInk
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidateSelf()
+        }
 
-    private val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    var pressedSegment: ColumnSegment? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidateSelf()
+        }
+
+    private val shellPath = Path()
+    private val shellRect = RectF()
+    private val segRect = RectF()
+    private val iconRect = RectF()
+
+    private val shellPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val gripPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val pressPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-    // draw() 在识别光晕呼吸动画期间每帧调用：圆角数组与渐变 shader 全部复用，避免每帧分配
-    private val bodyRadii = FloatArray(8)
-    private val glowRadii = FloatArray(8)
-    private var bodyShader: LinearGradient? = null
-    private val shaderRect = RectF()
-
-    fun setAccentColor(newColor: Int) {
-        if (accent == newColor) return
-        accent = newColor
-        invalidateSelf()
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
 
-    fun setPressed(isPressed: Boolean) {
-        if (pressed == isPressed) return
-        pressed = isPressed
-        invalidateSelf()
-    }
-
-    fun setOnRight(right: Boolean) {
-        if (onRight == right) return
-        onRight = right
-        invalidateSelf()
-    }
-
-    fun setGlow(pulseValue: Float, level: Float) {
-        pulse = pulseValue
-        glowLevel = level
-        invalidateSelf()
+    /** 落点属于哪一段；两边都不是（外壳空白/中缝/边距）返回 null */
+    fun hitSegment(x: Float, y: Float): ColumnSegment? {
+        topSegmentRect(segRect)
+        if (segRect.contains(x, y)) return ColumnSegment.TOP
+        bottomSegmentRect(segRect)
+        if (segRect.contains(x, y)) return ColumnSegment.BOTTOM
+        return null
     }
 
     override fun draw(canvas: Canvas) {
         val w = bounds.width().toFloat()
         val h = bounds.height().toFloat()
         if (w <= 0f || h <= 0f) return
-        val m = marginPx.toFloat()
-        val tabW = w - 2f * m
-        val tabH = h - 2f * m
-        // 贴屏幕边的一侧不留 margin，签体直接压在边缘上
-        bodyRect.set(
-            if (onRight) w - tabW else 0f, m,
-            if (onRight) w else tabW, h - m
-        )
 
-        // 识别光晕：沿签体轮廓向外扩散的红环（先画，垫在签体之下）
-        if (glowLevel > 0.01f) {
-            val expand = m * (0.3f + pulse * 0.95f)
-            glowRect.set(
-                bodyRect.left - expand, bodyRect.top - expand,
-                bodyRect.right + expand, bodyRect.bottom + expand
-            )
-            val glowR = tabW * 0.5f + expand
-            glowPath.reset()
-            fillCornerRadii(glowRadii, glowR, glowR, glowR * 0.6f)
-            glowPath.addRoundRect(glowRect, glowRadii, Path.Direction.CW)
-            glowPaint.style = Paint.Style.STROKE
-            glowPaint.strokeWidth = m * 0.45f
-            glowPaint.color = accent
-            glowPaint.alpha = (glowLevel * (1f - pulse) * 0.55f * 255f).toInt().coerceIn(0, 255)
-            canvas.drawPath(glowPath, glowPaint)
-        }
-
-        // 签体：磨砂玻璃（内侧大圆角、贴边侧小圆角）
-        bodyPath.reset()
-        fillCornerRadii(bodyRadii, tabW * 0.5f, tabW * 0.5f, tabW * 0.3f)
-        bodyPath.addRoundRect(bodyRect, bodyRadii, Path.Direction.CW)
-        if (bodyShader == null || shaderRect != bodyRect) {
-            shaderRect.set(bodyRect)
-            bodyShader = LinearGradient(
-                bodyRect.centerX(), bodyRect.top, bodyRect.centerX(), bodyRect.bottom,
-                0xE6FFFFFF.toInt(),
-                0xB8EDEDEF.toInt(),
-                Shader.TileMode.CLAMP
-            )
-        }
-        bodyPaint.shader = bodyShader
-        canvas.drawPath(bodyPath, bodyPaint)
-
-        // 描边：中性、低透明度
+        // 外壳：白底 + 发丝描边（项目语言：靠底色差 + 描边两级区分）
+        fillShellRect(shellRect)
+        shellPath.reset()
+        shellPath.addRoundRect(shellRect, shellRadiusPx, shellRadiusPx, Path.Direction.CW)
+        shellPaint.color = CardWhite
+        canvas.drawPath(shellPath, shellPaint)
         borderPaint.style = Paint.Style.STROKE
-        borderPaint.strokeWidth = (tabW * 0.04f).coerceAtLeast(1.2f)
-        borderPaint.color = 0x33000000
-        canvas.drawPath(bodyPath, borderPaint)
+        borderPaint.strokeWidth = 0.6f * density
+        borderPaint.color = HairlineBorder
+        canvas.drawPath(shellPath, borderPaint)
 
-        // 握柄：居中竖条，颜色即状态
-        val gripW = (tabW * 0.14f).coerceAtLeast(m * 0.2f)
-        val gripH = tabH * (0.32f + 0.14f * gripExtend)
-        gripPaint.color = accent
-        canvas.drawRoundRect(
-            bodyRect.centerX() - gripW / 2f, bodyRect.centerY() - gripH / 2f,
-            bodyRect.centerX() + gripW / 2f, bodyRect.centerY() + gripH / 2f,
-            gripW / 2f, gripW / 2f, gripPaint
+        // 上段：浅灰底 + 扫描图标
+        topSegmentRect(segRect)
+        shellPaint.color = scanBg
+        canvas.drawRoundRect(segRect, segRadiusPx, segRadiusPx, shellPaint)
+        drawPressOverlay(canvas, ColumnSegment.TOP)
+        drawScanIcon(canvas, segRect.centerX(), segRect.centerY(), scanFg)
+
+        // 下段：淡红底 + 相机图标
+        bottomSegmentRect(segRect)
+        shellPaint.color = CamIdleBg
+        canvas.drawRoundRect(segRect, segRadiusPx, segRadiusPx, shellPaint)
+        drawPressOverlay(canvas, ColumnSegment.BOTTOM)
+        drawCameraIcon(canvas, segRect.centerX(), segRect.centerY(), CamIconRed)
+
+        // 中缝细分隔线
+        fillShellRect(shellRect)
+        val lineWidth = dividerWidthPx().toFloat()
+        val lineY = shellRect.top + shellPadPx + segSizePx + segGapPx / 2f
+        borderPaint.strokeWidth = 1f * density
+        borderPaint.color = DividerColor
+        canvas.drawLine(
+            shellRect.centerX() - lineWidth / 2f, lineY,
+            shellRect.centerX() + lineWidth / 2f, lineY,
+            borderPaint
         )
-
-        // 按压：整体压一层淡黑（iOS 按钮手感）
-        if (pressed) {
-            pressPaint.color = 0x14000000
-            canvas.drawPath(bodyPath, pressPaint)
-        }
     }
 
-    // 圆角：贴右缘时内侧在左（左上/左下大圆角）；贴左缘时镜像。写入复用数组，不分配
-    private fun fillCornerRadii(out: FloatArray, innerR: Float, innerRy: Float, outerR: Float) {
-        if (onRight) {
-            out[0] = innerR; out[1] = innerRy
-            out[2] = outerR; out[3] = outerR
-            out[4] = outerR; out[5] = outerR
-            out[6] = innerR; out[7] = innerRy
-        } else {
-            out[0] = outerR; out[1] = outerR
-            out[2] = innerR; out[3] = innerRy
-            out[4] = innerR; out[5] = innerRy
-            out[6] = outerR; out[7] = outerR
-        }
+    private fun drawPressOverlay(canvas: Canvas, segment: ColumnSegment) {
+        if (pressedSegment != segment) return
+        pressPaint.color = PressTint
+        canvas.drawRoundRect(segRect, segRadiusPx, segRadiusPx, pressPaint)
     }
 
-    // 提供签体轮廓（与 draw 中的 bodyRect 一致：贴边侧无 margin），elevation 投影才能渲染
+    // 扫描图标：四角圆括号 + 中心圆角方框（识别/取景语义，与设计稿一致）
+    // 每个角的弧都必须以「当前点即弧起点」为准：起点角 = 该边射入角，sweep 朝角内收拢，
+    // 否则 forceMoveTo=false 会先补一条通到弧起点的斜线，四角会卷成逗号形
+    private fun drawScanIcon(canvas: Canvas, cx: Float, cy: Float, color: Int) {
+        iconPaint.color = color
+        iconPaint.strokeWidth = 1.5f * density
+        val half = iconPx / 2f
+        val arm = iconPx * 0.34f
+        val cornerR = iconPx * 0.13f
+        val cl = cx - half
+        val ct = cy - half
+        val cr = cx + half
+        val cb = cy + half
+        val path = Path()
+        // 左上：沿上边向左 → 逆时针绕角 → 沿左边向下
+        path.moveTo(cl + arm, ct)
+        path.lineTo(cl + cornerR, ct)
+        iconRect.set(cl, ct, cl + 2f * cornerR, ct + 2f * cornerR)
+        path.arcTo(iconRect, 270f, -90f)
+        path.lineTo(cl, ct + arm)
+        // 右上：沿上边向右 → 顺时针绕角 → 沿右边向下
+        path.moveTo(cr - arm, ct)
+        path.lineTo(cr - cornerR, ct)
+        iconRect.set(cr - 2f * cornerR, ct, cr, ct + 2f * cornerR)
+        path.arcTo(iconRect, 270f, 90f)
+        path.lineTo(cr, ct + arm)
+        // 右下：沿下边向右 → 逆时针绕角 → 沿右边向上
+        path.moveTo(cr - arm, cb)
+        path.lineTo(cr - cornerR, cb)
+        iconRect.set(cr - 2f * cornerR, cb - 2f * cornerR, cr, cb)
+        path.arcTo(iconRect, 90f, -90f)
+        path.lineTo(cr, cb - arm)
+        // 左下：沿下边向左 → 顺时针绕角 → 沿左边向上
+        path.moveTo(cl + arm, cb)
+        path.lineTo(cl + cornerR, cb)
+        iconRect.set(cl, cb - 2f * cornerR, cl + 2f * cornerR, cb)
+        path.arcTo(iconRect, 90f, 90f)
+        path.lineTo(cl, cb - arm)
+        canvas.drawPath(path, iconPaint)
+
+        val inner = iconPx * 0.30f
+        canvas.drawRoundRect(
+            RectF(cx - inner / 2f, cy - inner / 2f, cx + inner / 2f, cy + inner / 2f),
+            inner * 0.30f, inner * 0.30f, iconPaint
+        )
+    }
+
+    // 相机图标：机身圆角矩形 + 顶部取景凸起 + 镜头圈
+    private fun drawCameraIcon(canvas: Canvas, cx: Float, cy: Float, color: Int) {
+        iconPaint.color = color
+        iconPaint.strokeWidth = 1.5f * density
+        val bodyW = iconPx * 0.96f
+        val bodyH = iconPx * 0.68f
+        val top = cy - bodyH * 0.30f
+        canvas.drawRoundRect(
+            RectF(cx - bodyW / 2f, top, cx + bodyW / 2f, top + bodyH),
+            bodyH * 0.20f, bodyH * 0.20f, iconPaint
+        )
+        val bumpW = bodyW * 0.34f
+        val bumpH = bodyH * 0.26f
+        canvas.drawRoundRect(
+            RectF(cx - bodyW * 0.18f, top - bumpH, cx - bodyW * 0.18f + bumpW, top + bumpH * 0.8f),
+            bumpH * 0.45f, bumpH * 0.45f, iconPaint
+        )
+        canvas.drawCircle(cx, top + bodyH * 0.52f, bodyH * 0.29f, iconPaint)
+    }
+
+    private fun fillShellRect(out: RectF) {
+        out.set(
+            marginPx.toFloat(), marginPx.toFloat(),
+            bounds.width() - marginPx.toFloat(), bounds.height() - marginPx.toFloat()
+        )
+    }
+
+    private fun topSegmentRect(out: RectF) {
+        fillShellRect(out)
+        val left = out.left + shellPadPx
+        val top = out.top + shellPadPx
+        out.set(left, top, left + segSizePx, top + segSizePx)
+    }
+
+    private fun bottomSegmentRect(out: RectF) {
+        fillShellRect(out)
+        val left = out.left + shellPadPx
+        val top = out.top + shellPadPx + segSizePx + segGapPx
+        out.set(left, top, left + segSizePx, top + segSizePx)
+    }
+
+    private fun dividerWidthPx(): Int = (segSizePx * 0.64f).toInt()
+
+    // elevation 投影只认外壳轮廓（不含透明外边距）
     override fun getOutline(outline: Outline) {
         val w = bounds.width()
         val h = bounds.height()
         if (w <= 0 || h <= 0) return
-        val m = marginPx
-        val tabW = w - 2 * m
-        val left = if (onRight) w - tabW else 0
-        outline.setRoundRect(left, m, left + tabW, h - m, tabW * 0.4f)
+        outline.setRoundRect(marginPx, marginPx, w - marginPx, h - marginPx, shellRadiusPx)
     }
 
     override fun setAlpha(alpha: Int) {}
@@ -234,7 +292,7 @@ private class EdgeTabDrawable(initialColor: Int, private val marginPx: Int) : Dr
 }
 
 /**
- * 边签状态：签体始终是磨砂玻璃，居中握柄颜色即状态——待机墨 / 识别红 + 呼吸光晕 / 成功绿 / 失败灰
+ * 边签状态：上段底色与图标颜色即状态——待机灰 / 识别红 / 成功绿 / 失败灰
  */
 enum class BallState { IDLE, SCANNING, SUCCESS, ERROR }
 
@@ -254,6 +312,8 @@ class FloatingOverlayController(
 ) {
     interface Callbacks {
         fun onCaptureClick()
+        // 下段按钮：单击保存一张截图（不 OCR、不写价格库、不弹菜单）
+        fun onHdCaptureClick()
         fun onSaveClick(title: String, priceCents: Long, ocrTitle: String)
         fun onReCaptureClick()
         fun onPriceChanged(priceCents: Long?)
@@ -262,51 +322,12 @@ class FloatingOverlayController(
     }
 
     // 单击=价格识别；双击=轮换跳转比价应用（一个都没设则回拼多多）；长按=跳转拼多多。
-    // 由 GestureDetector 统一判定，避免 View 自带的 click/longClick 与拖拽触摸监听相互干扰
-    private val gestureListener = object : GestureDetector.SimpleOnGestureListener() {
-        // 手动双击判定：系统默认 300ms 窗口在部分 ROM 上偏短，放宽到 500ms。
-        // 单击延迟 500ms 派发识别，期间第二击到达则取消并跳转比价应用
-        override fun onSingleTapUp(e: MotionEvent): Boolean {
-            val now = SystemClock.uptimeMillis()
-            if (now - lastTapUpTime < DOUBLE_TAP_TIMEOUT_MS) {
-                resetTapState()
-                cancelAutoCollapse()
-                launchNextCompareApp()
-            } else {
-                lastTapUpTime = now
-                pendingSingleTap?.cancel()
-                pendingSingleTap = scope.launch {
-                    delay(DOUBLE_TAP_TIMEOUT_MS)
-                    pendingSingleTap = null
-                    cancelAutoCollapse()
-                    callbacks.onCaptureClick()
-                }
-            }
-            return true
-        }
-
-        // 快速双击（间隔 <300ms）系统走这里而不触发 onSingleTapUp，需单独接住
-        override fun onDoubleTap(e: MotionEvent): Boolean {
-            resetTapState()
-            cancelAutoCollapse()
-            launchNextCompareApp()
-            return true
-        }
-
-        override fun onLongPress(e: MotionEvent) {
-            resetTapState()
-            cancelAutoCollapse()
-            launchPdd()
-        }
-    }
-
+    // 全部由自绘手势状态机判定：按下瞬间锁定归属段，拖动一接管就作废所有待触发动作
     private fun resetTapState() {
         lastTapUpTime = 0L
         pendingSingleTap?.cancel()
         pendingSingleTap = null
     }
-
-    private val gestureDetector = GestureDetector(context, gestureListener)
 
     private var lastTapUpTime = 0L
     private var pendingSingleTap: Job? = null
@@ -327,18 +348,25 @@ class FloatingOverlayController(
     private var lastDetachAt = 0L
     private var detachBurst = 0
 
-    // 边签相关
+    // 双段按钮相关
     private var ballWrap: FrameLayout? = null
     private var ballFace: View? = null
-    private var ballFaceDrawable: EdgeTabDrawable? = null
-    private var glowPulseAnimator: ValueAnimator? = null
-    private var glowFadeAnimator: ValueAnimator? = null
-    private var glowLevel = 0f
-    private var glowPulse = 0f
-    private var gripExtendAnimator: ValueAnimator? = null
-    private var ballColorAnimator: ValueAnimator? = null
-    private var currentBallColor = InkColor
+    private var ballFaceDrawable: RoundedColumnDrawable? = null
+    private var scanBgAnimator: ValueAnimator? = null
+    private var scanFgAnimator: ValueAnimator? = null
+    private var currentScanBg = ScanIdleBg
+    private var currentScanFg = ScanIconInk
     private var panelSlideAnimator: ValueAnimator? = null
+
+    // 截图期间临时隐藏悬浮控件：记录面板原有可见性，截图结束后原样恢复
+    private var captureHidden = false
+    private var capturePanelWasVisible = false
+
+    // 悬浮提示气泡：Toast 在 MIUI/HyperOS 上会因应用通知权限被系统静默抑制
+    // （logcat: Suppressing toast ... by user request），反馈改由自有悬浮窗给出，恒定可见
+    private var hintView: TextView? = null
+    private var hintParams: WindowManager.LayoutParams? = null
+    private var hintJob: Job? = null
 
     // 结果面板相关
     private var resultPanel: LinearLayout? = null
@@ -472,9 +500,9 @@ class FloatingOverlayController(
 
         // 入场：从所在边缘"长出来"（贴哪条边就朝屏内滑入）
         val slideFrom = if (currentTabOnRight()) {
-            dp(TAB_MARGIN_DP + TAB_W_DP).toFloat()
+            dp(COLUMN_MARGIN_DP + SHELL_W_DP).toFloat()
         } else {
-            -dp(TAB_MARGIN_DP + TAB_W_DP).toFloat()
+            -dp(COLUMN_MARGIN_DP + SHELL_W_DP).toFloat()
         }
         ball.alpha = 0f
         ball.translationX = slideFrom
@@ -484,7 +512,6 @@ class FloatingOverlayController(
             .setDuration(360L)
             .setInterpolator(DecelerateInterpolator())
             .start()
-        updateTabSide()
 
         // 面板结构预先创建；其窗口独立于球窗口，展示时才挂载
         resultPanel = createResultPanel()
@@ -511,7 +538,6 @@ class FloatingOverlayController(
         cancelAutoCollapse()
         panelSlideAnimator?.cancel()
         resultPanel?.animate()?.cancel()
-        animateGripExtend(0f)
         panelView?.let { pv ->
             if (pv.isAttachedToWindow) runCatching { windowManager?.removeView(pv) }
         }
@@ -524,16 +550,27 @@ class FloatingOverlayController(
         }
         ballWrap = ball
 
-        // 边签：签体在 view 内居中、四周留 margin 供光晕扩散
-        val face = EdgeTabDrawable(currentBallColor, dp(TAB_MARGIN_DP))
+        // 圆角方柱：外壳四周留 margin 供投影扩散，贴边时间距即与此一致（8dp）
+        val face = RoundedColumnDrawable(
+            marginPx = dp(COLUMN_MARGIN_DP),
+            segSizePx = dp(SEG_DP),
+            shellPadPx = dp(SHELL_PAD_DP),
+            segGapPx = dp(SEG_GAP_DP),
+            shellRadiusPx = dp(SHELL_RADIUS_DP).toFloat(),
+            segRadiusPx = dp(SEG_RADIUS_DP).toFloat(),
+            iconPx = dp(ICON_DP),
+            density = context.resources.displayMetrics.density
+        )
         ballFaceDrawable = face
         ballFace = View(context).apply {
             background = face
-            elevation = dp(6).toFloat()
+            elevation = dp(4).toFloat()
         }
+        // 无障碍名称：上段识别、下段截图，功能不靠颜色辨认
+        ballFace?.contentDescription = "上段：识别价格；下段：保存截图"
         ball.addView(ballFace, FrameLayout.LayoutParams(tabViewW(), tabViewH(), Gravity.CENTER))
 
-        attachDrag(ball, withGestures = true)
+        attachBallTouch(ball)
         return ball
     }
 
@@ -815,7 +852,8 @@ class FloatingOverlayController(
 
     // ---- 拖拽相关 ----
 
-    private fun attachDrag(view: View, withGestures: Boolean = false) {
+    // 面板容器可拖动：按住卡片空白也能移动整组（与球共用同一套位置参数）
+    private fun attachDrag(view: View) {
         var downRawX = 0f
         var downRawY = 0f
         var startX = 0
@@ -824,16 +862,14 @@ class FloatingOverlayController(
 
         view.setOnTouchListener { _, event ->
             val params = overlayParams ?: return@setOnTouchListener false
-            if (withGestures) gestureDetector.onTouchEvent(event)
-            when (event.action) {
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downRawX = event.rawX
                     downRawY = event.rawY
                     startX = params.x
                     startY = params.y
                     moved = false
-                    if (withGestures) animateBallPressed(true)
-                    withGestures
+                    false
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downRawX).toInt()
@@ -842,22 +878,136 @@ class FloatingOverlayController(
                         moved = true
                         moveOverlayTo(startX + dx, startY + dy)
                     }
-                    withGestures
+                    moved
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (withGestures) animateBallPressed(false)
-                    if (moved) {
-                        snapOverlayToNearestEdge()
-                    }
-                    withGestures || moved
+                    if (moved) snapOverlayToNearestEdge()
+                    moved
                 }
-                MotionEvent.ACTION_CANCEL -> {
-                    if (withGestures) animateBallPressed(false)
-                    withGestures
-                }
-                else -> withGestures
+                else -> false
             }
         }
+    }
+
+    /**
+     * 悬浮球手势：自绘状态机（替代 GestureDetector，避免一次触摸触发两条回调）。
+     * - 按下瞬间按落点锁定归属段，手指随后滑到另一段也不会触发它（跨段不误触）；
+     * - 落点在外壳空白 / 中缝细线 / 透明边距 = 本次手势只能拖动，不触发任何功能；
+     * - 位移超过系统手势阈值即由拖动接管：作废待触发的点击、长按与双击，松手只贴边。
+     */
+    private fun attachBallTouch(view: View) {
+        val slop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+        val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
+        var downRawX = 0f
+        var downRawY = 0f
+        var startX = 0
+        var startY = 0
+        var dragging = false
+        var longPressFired = false
+        var segment: ColumnSegment? = null
+        var longPressJob: Job? = null
+
+        view.setOnTouchListener { _, event ->
+            val params = overlayParams ?: return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    startX = params.x
+                    startY = params.y
+                    dragging = false
+                    longPressFired = false
+                    segment = ballFaceDrawable?.hitSegment(event.x, event.y)
+                    setSegmentPressed(segment)
+                    animateBallPressed(true)
+                    if (segment == ColumnSegment.TOP) {
+                        longPressJob = scope.launch {
+                            delay(longPressMs)
+                            longPressJob = null
+                            if (!dragging && segment == ColumnSegment.TOP) {
+                                longPressFired = true
+                                setSegmentPressed(null)
+                                resetTapState()
+                                cancelAutoCollapse()
+                                launchPdd()
+                            }
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragging) {
+                        val dx = event.rawX - downRawX
+                        val dy = event.rawY - downRawY
+                        if (dx * dx + dy * dy > slop * slop) {
+                            dragging = true
+                            // 拖动接管：所有待触发动作立即作废，松手不得识别/截图/跳应用
+                            longPressJob?.cancel()
+                            longPressJob = null
+                            resetTapState()
+                            setSegmentPressed(null)
+                        }
+                    }
+                    if (dragging) {
+                        moveOverlayTo(
+                            startX + (event.rawX - downRawX).toInt(),
+                            startY + (event.rawY - downRawY).toInt()
+                        )
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    longPressJob?.cancel()
+                    longPressJob = null
+                    animateBallPressed(false)
+                    setSegmentPressed(null)
+                    when {
+                        dragging -> snapOverlayToNearestEdge()
+                        longPressFired -> Unit
+                        segment == ColumnSegment.TOP -> handleTopTap()
+                        segment == ColumnSegment.BOTTOM -> {
+                            cancelAutoCollapse()
+                            callbacks.onHdCaptureClick()
+                        }
+                        else -> Unit
+                    }
+                    segment = null
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    longPressJob?.cancel()
+                    longPressJob = null
+                    animateBallPressed(false)
+                    setSegmentPressed(null)
+                    segment = null
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    // 上段点击：500ms 内第二击 = 双击跳比价应用；否则延迟 500ms 派发识别
+    private fun handleTopTap() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastTapUpTime < DOUBLE_TAP_TIMEOUT_MS) {
+            resetTapState()
+            cancelAutoCollapse()
+            launchNextCompareApp()
+        } else {
+            lastTapUpTime = now
+            pendingSingleTap?.cancel()
+            pendingSingleTap = scope.launch {
+                delay(DOUBLE_TAP_TIMEOUT_MS)
+                pendingSingleTap = null
+                cancelAutoCollapse()
+                callbacks.onCaptureClick()
+            }
+        }
+    }
+
+    private fun setSegmentPressed(segment: ColumnSegment?) {
+        ballFaceDrawable?.pressedSegment = segment
     }
 
     // 只移动球窗口；若面板窗口已挂载则同步跟随。备用球周期内不挂载，无需跟移——
@@ -867,7 +1017,6 @@ class FloatingOverlayController(
         params.x = clampOverlayX(x)
         params.y = clampOverlayY(y)
         runCatching { windowManager?.updateViewLayout(overlayView, params) }
-        updateTabSide()
         syncPanelPosition()
     }
 
@@ -888,11 +1037,7 @@ class FloatingOverlayController(
         return params.x + w / 2 >= screenW / 2
     }
 
-    private fun updateTabSide() {
-        ballFaceDrawable?.setOnRight(currentTabOnRight())
-    }
-
-    // 面板窗口位置：识别卡片贴着边签朝屏幕内侧展开，垂直方向与签中心对齐（像挂在签上的活页）
+    // 面板窗口位置：识别卡片贴着圆角方柱朝屏幕内侧展开，垂直方向与按钮中心对齐
     private fun computePanelPosition() {
         val tabP = overlayParams ?: return
         val panelP = panelParams ?: return
@@ -900,16 +1045,17 @@ class FloatingOverlayController(
         val screenH = context.resources.displayMetrics.heightPixels
         val viewW = overlayView?.width?.takeIf { it > 0 } ?: tabViewW()
         val tabH = overlayView?.height?.takeIf { it > 0 } ?: tabViewH()
-        val bodyW = dp(TAB_W_DP)
+        val bodyW = dp(SHELL_W_DP)
+        val margin = dp(COLUMN_MARGIN_DP)
         val panelW = dp(PANEL_W_DP)
         val panelH = panelHeightEstimate()
         val gap = dp(3)
 
-        // 以签体边缘（而非 view 边缘）为基准：view 贴边侧内还有空白，不能算进间距
+        // 以外壳边缘（而非 view 边缘）为基准：view 四周内还有透明边距，不能算进间距
         panelP.x = if (currentTabOnRight()) {
-            tabP.x + viewW - bodyW - gap - panelW
+            tabP.x + viewW - margin - bodyW - gap - panelW
         } else {
-            tabP.x + bodyW + gap
+            tabP.x + margin + bodyW + gap
         }
         panelP.x = panelP.x.coerceIn(0, (screenW - panelW).coerceAtLeast(0))
 
@@ -954,7 +1100,6 @@ class FloatingOverlayController(
             params.x = if (centerX < screenW / 2) 0 else screenW - overlayWidth
             params.y = clampOverlayY(params.y)
             runCatching { windowManager?.updateViewLayout(overlayView, params) }
-            updateTabSide()
             syncPanelPosition()
             persistTabPosition()
         }
@@ -1155,7 +1300,6 @@ class FloatingOverlayController(
         if (panel.visibility == View.VISIBLE && pv.isAttachedToWindow) {
             // 已在展示中：复位视觉状态并跟随签的位置
             panel.alpha = 1f
-            animateGripExtend(1f)
             syncPanelPosition()
             return
         }
@@ -1175,7 +1319,6 @@ class FloatingOverlayController(
 
         panel.alpha = 0f
         panel.visibility = View.VISIBLE
-        animateGripExtend(1f)
 
         panelSlideAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 320L
@@ -1210,7 +1353,6 @@ class FloatingOverlayController(
         val slide = dp(72)
         val startX = pp.x
         val startAlpha = panel.alpha
-        animateGripExtend(0f)
 
         // 收回：卡片沿原路滑回签后方并淡出
         panelSlideAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -1235,52 +1377,53 @@ class FloatingOverlayController(
         }
     }
 
-    // ---- 边签状态 ----
+    // ---- 按钮状态：上段底色与图标颜色即状态 ----
 
     private fun setBallState(state: BallState) {
-        when (state) {
-            BallState.IDLE -> {
-                stopGlowPulse()
-                animateBallColor(InkColor)
-            }
-            BallState.SCANNING -> {
-                animateBallColor(BrandRed)
-                startGlowPulse()
-            }
-            BallState.SUCCESS -> {
-                stopGlowPulse()
-                animateBallColor(FreshGreen)
-            }
-            BallState.ERROR -> {
-                stopGlowPulse()
-                animateBallColor(TextSecondary)
-            }
+        val (bg, fg) = when (state) {
+            BallState.IDLE -> ScanIdleBg to ScanIconInk
+            BallState.SCANNING -> ScanScanBg to BrandRed
+            BallState.SUCCESS -> ScanOkBg to FreshGreen
+            BallState.ERROR -> ScanErrBg to TextSecondary
         }
+        animateScanColors(bg, fg)
     }
 
-    private fun animateBallColor(target: Int) {
+    private fun animateScanColors(bg: Int, fg: Int) {
         val drawable = ballFaceDrawable ?: return
-        if (currentBallColor == target) return
-        ballColorAnimator?.cancel()
-        ballColorAnimator = ValueAnimator.ofObject(ArgbEvaluator(), currentBallColor, target).apply {
-            duration = 320L
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { animator ->
-                currentBallColor = animator.animatedValue as Int
-                drawable.setAccentColor(currentBallColor)
+        if (currentScanBg != bg) {
+            scanBgAnimator?.cancel()
+            scanBgAnimator = ValueAnimator.ofObject(ArgbEvaluator(), currentScanBg, bg).apply {
+                duration = 220L
+                interpolator = DecelerateInterpolator()
+                addUpdateListener { animator ->
+                    currentScanBg = animator.animatedValue as Int
+                    drawable.scanBg = currentScanBg
+                }
+                start()
             }
-            start()
+        }
+        if (currentScanFg != fg) {
+            scanFgAnimator?.cancel()
+            scanFgAnimator = ValueAnimator.ofObject(ArgbEvaluator(), currentScanFg, fg).apply {
+                duration = 220L
+                interpolator = DecelerateInterpolator()
+                addUpdateListener { animator ->
+                    currentScanFg = animator.animatedValue as Int
+                    drawable.scanFg = currentScanFg
+                }
+                start()
+            }
         }
     }
 
-    // 按压手感：按下缩到 0.94 + 高光点下移（光被压低），松手弹性回弹
+    // 按压手感：按下缩到 0.95，松手弹性回弹
     private fun animateBallPressed(isPressed: Boolean) {
         val wrap = ballWrap ?: return
-        ballFaceDrawable?.setPressed(isPressed)
         wrap.animate().cancel()
         if (isPressed) {
             wrap.animate()
-                .scaleX(0.94f).scaleY(0.94f)
+                .scaleX(0.95f).scaleY(0.95f)
                 .setDuration(110L)
                 .setInterpolator(AccelerateInterpolator())
                 .start()
@@ -1293,68 +1436,116 @@ class FloatingOverlayController(
         }
     }
 
-    // 识别呼吸光晕：沿签体轮廓扩散的红环，直接画在签的 drawable 里
-    private fun startGlowPulse() {
-        val drawable = ballFaceDrawable ?: return
-        glowPulseAnimator?.cancel()
-        glowFadeAnimator?.cancel()
-        glowPulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 700L
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-            addUpdateListener { animator ->
-                glowPulse = animator.animatedValue as Float
-                drawable.setGlow(glowPulse, glowLevel)
-            }
-            start()
+    // ---- 截图期间临时隐藏 ----
+
+    /**
+     * 截图前隐藏悬浮控件：球窗口与结果面板一起隐去（窗口仍挂着，只是不渲染），
+     * 这样取到的帧里不会带本软件按钮；面板被临时隐藏期间暂停自动收起，
+     * 结束后按原可见性恢复，不改动面板里的商品与价格。
+     */
+    fun hideForCapture() {
+        if (captureHidden) return
+        captureHidden = true
+        capturePanelWasVisible = resultPanel?.visibility == View.VISIBLE
+        if (capturePanelWasVisible) cancelAutoCollapse()
+        // 提示气泡也是本软件的控件，必须立刻摘掉（不做淡出动画）：否则会被拍进截图
+        removeHintNow()
+        overlayView?.visibility = View.INVISIBLE
+        if (capturePanelWasVisible) panelView?.visibility = View.INVISIBLE
+    }
+
+    fun restoreAfterCapture() {
+        if (!captureHidden) return
+        captureHidden = false
+        overlayView?.visibility = View.VISIBLE
+        if (capturePanelWasVisible) {
+            panelView?.visibility = View.VISIBLE
+            // 面板本来就在展示中：恢复后继续原有的自动收起计时
+            scheduleAutoCollapse()
         }
-        glowFadeAnimator = ValueAnimator.ofFloat(glowLevel, 1f).apply {
-            duration = 240L
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { animator ->
-                glowLevel = animator.animatedValue as Float
-                drawable.setGlow(glowPulse, glowLevel)
-            }
-            start()
+        capturePanelWasVisible = false
+    }
+
+    // ---- 悬浮提示气泡 ----
+
+    /**
+     * 在自有悬浮窗里弹一条短提示（1.8 秒后自动消失）。
+     * 位置固定在屏幕底部居中——不贴球，避免与结果面板、悬浮球重叠，也不会挡到拖动。
+     */
+    fun showHint(message: String) {
+        val wm = windowManager ?: return
+        if (!isShowing) return
+        val view = ensureHintView()
+        view.text = message
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(dp(HINT_MAX_W_DP), View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.UNSPECIFIED
+        )
+        val params = hintParams ?: WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+            .also { hintParams = it }
+
+        val hintW = view.measuredWidth.coerceAtLeast(dp(96))
+        val hintH = view.measuredHeight.coerceAtLeast(dp(40))
+        val screenW = context.resources.displayMetrics.widthPixels
+        val screenH = context.resources.displayMetrics.heightPixels
+        params.x = ((screenW - hintW) / 2).coerceAtLeast(0)
+        params.y = (screenH - hintH - dp(HINT_BOTTOM_MARGIN_DP))
+            .coerceIn(0, (screenH - hintH).coerceAtLeast(0))
+
+        if (view.isAttachedToWindow) {
+            runCatching { wm.updateViewLayout(view, params) }
+        } else {
+            view.alpha = 0f
+            runCatching { wm.addView(view, params) }
+        }
+        view.animate().cancel()
+        view.animate().alpha(1f).setDuration(HINT_FADE_MS).start()
+
+        hintJob?.cancel()
+        hintJob = scope.launch {
+            delay(HINT_MS)
+            fadeOutHint()
         }
     }
 
-    private fun stopGlowPulse() {
-        val drawable = ballFaceDrawable ?: return
-        glowPulseAnimator?.cancel()
-        glowFadeAnimator?.cancel()
-        glowFadeAnimator = ValueAnimator.ofFloat(glowLevel, 0f).apply {
-            duration = 240L
-            addUpdateListener { animator ->
-                glowLevel = animator.animatedValue as Float
-                drawable.setGlow(glowPulse, glowLevel)
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator, isReverse: Boolean) {
-                    if (glowLevel <= 0.01f) {
-                        glowPulseAnimator?.cancel()
-                        glowPulseAnimator = null
-                    }
-                }
-            })
-            start()
-        }
+    private fun ensureHintView(): TextView = hintView ?: TextView(context).apply {
+        setTextColor(TextPrimary)
+        textSize = 13f
+        setPadding(dp(16), dp(10), dp(16), dp(10))
+        maxWidth = dp(HINT_MAX_W_DP)
+        background = roundedBackground(CardWhite, radiusDp = 14, withStroke = true)
+        elevation = dp(6).toFloat()
+        hintView = this
     }
 
-    // 握柄伸缩：卡片挂上时签的握柄拉长，表示"签连着卡"
-    private fun animateGripExtend(target: Float) {
-        val drawable = ballFaceDrawable ?: return
-        gripExtendAnimator?.cancel()
-        val start = drawable.gripExtend
-        if (kotlin.math.abs(start - target) < 0.01f) return
-        gripExtendAnimator = ValueAnimator.ofFloat(start, target).apply {
-            duration = 220L
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { animator ->
-                drawable.gripExtend = animator.animatedValue as Float
+    private fun fadeOutHint() {
+        hintJob?.cancel()
+        hintJob = null
+        val view = hintView ?: return
+        view.animate().cancel()
+        view.animate()
+            .alpha(0f)
+            .setDuration(HINT_FADE_MS)
+            .withEndAction {
+                if (view.isAttachedToWindow) runCatching { windowManager?.removeView(view) }
             }
-            start()
-        }
+            .start()
+    }
+
+    // 立即摘掉提示（无动画）：截图前必须保证画面上没有本软件的控件
+    private fun removeHintNow() {
+        hintJob?.cancel()
+        hintJob = null
+        val view = hintView ?: return
+        view.animate().cancel()
+        if (view.isAttachedToWindow) runCatching { windowManager?.removeView(view) }
     }
 
     // ---- 编辑模式 ----
@@ -1438,9 +1629,9 @@ class FloatingOverlayController(
     private fun dp(value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
 
-    // 边签 view 尺寸 = 签体 + 四周光晕 margin
-    private fun tabViewW(): Int = dp(TAB_W_DP + TAB_MARGIN_DP * 2)
-    private fun tabViewH(): Int = dp(TAB_H_DP + TAB_MARGIN_DP * 2)
+    // 双段按钮 view 尺寸 = 外壳 + 四周透明边距（含投影扩散空间）
+    private fun tabViewW(): Int = dp(SHELL_W_DP + COLUMN_MARGIN_DP * 2)
+    private fun tabViewH(): Int = dp(SHELL_H_DP + COLUMN_MARGIN_DP * 2)
 
     private fun circleBackground(color: Int): GradientDrawable =
         GradientDrawable().apply {
@@ -1465,13 +1656,12 @@ class FloatingOverlayController(
         // 先置位再摘窗：本方主动摘除不触发 detach 哨兵的自愈/上报
         selfRemoving = true
         cancelAutoCollapse()
-        glowPulseAnimator?.cancel()
-        glowFadeAnimator?.cancel()
-        gripExtendAnimator?.cancel()
+        scanBgAnimator?.cancel()
+        scanFgAnimator?.cancel()
         panelSlideAnimator?.cancel()
-        ballColorAnimator?.cancel()
         ballWrap?.animate()?.cancel()
         resultPanel?.animate()?.cancel()
+        removeHintNow()
         overlayView?.let { view ->
             runCatching { windowManager?.removeView(view) }
         }
@@ -1485,10 +1675,22 @@ class FloatingOverlayController(
 
     companion object {
         private const val BALL_RESTORE_MS = 1_500L
-        private const val TAB_W_DP = 27
-        private const val TAB_H_DP = 76
-        private const val TAB_MARGIN_DP = 6
+        // 「一体双段 · 圆角方柱」尺寸（设计定稿起步值，按真机触达与画面占用校准）
+        private const val SEG_DP = 44              // 单段按压区
+        private const val SHELL_PAD_DP = 4         // 外壳内边距
+        private const val SEG_GAP_DP = 8           // 两段间隔（中缝）
+        private const val SHELL_RADIUS_DP = 16     // 外壳圆角
+        private const val SEG_RADIUS_DP = 11       // 每段圆角
+        private const val ICON_DP = 18             // 图标大小
+        private const val COLUMN_MARGIN_DP = 8     // 外壳距屏幕边缘 / 窗口内透明边距
+        private const val SHELL_W_DP = SEG_DP + SHELL_PAD_DP * 2
+        private const val SHELL_H_DP = SEG_DP * 2 + SHELL_PAD_DP * 2 + SEG_GAP_DP
         private const val PANEL_W_DP = 300
+        // 悬浮提示气泡：最大宽度、距屏幕底部留白、停留时长与淡入淡出时长
+        private const val HINT_MAX_W_DP = 260
+        private const val HINT_BOTTOM_MARGIN_DP = 132
+        private const val HINT_MS = 1_800L
+        private const val HINT_FADE_MS = 150L
         // 系统摘窗自愈的限速参数：5 秒窗口内最多重挂 2 次，超过判定为 ROM 限制循环
         private const val REATTACH_WINDOW_MS = 5_000L
         private const val MAX_REATTACH_ATTEMPTS = 2

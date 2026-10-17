@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [ProductPrice::class, ProductPriceHistory::class, SyncTombstone::class],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -110,6 +110,13 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        // v8：历史表加规格型号列（SKU 感知识别）。存量行无型号信息，回填空串
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `product_price_history` ADD COLUMN `skuLabel` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(
                 context.applicationContext,
@@ -118,7 +125,7 @@ abstract class AppDatabase : RoomDatabase() {
             )
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-                    migration4to5(context), MIGRATION_5_6, MIGRATION_6_7
+                    migration4to5(context), MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8
                 )
                 .build()
     }

@@ -28,5 +28,8 @@ data class ProductPriceHistory(
     val deviceName: String = "本机",
     // 识别后自动保存（未经用户在面板上点确认）的记录。历史明细中以「自动记录」灰字
     // 区分人工确认过的记录；错价回溯时优先核对带此标的行
-    val autoSaved: Boolean = false
+    val autoSaved: Boolean = false,
+    // 规格型号（「黑色12GB+256GB Wifi版」）：SKU 弹窗/详情页已选行提取的型号标。
+    // 空串=无型号信息（存量记录或页面无该信号）；价格史图表按此分轨
+    val skuLabel: String = ""
 )

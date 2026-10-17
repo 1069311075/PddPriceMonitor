@@ -182,6 +182,9 @@ import com.example.pddpricemonitor.sync.DeviceIdentity
 import com.example.pddpricemonitor.sync.DiscoveredRoom
 import com.example.pddpricemonitor.sync.SyncState
 import com.example.pddpricemonitor.ui.MainViewModel
+import com.example.pddpricemonitor.ui.hdcapture.HdCaptureGalleryDialog
+import com.example.pddpricemonitor.ui.hdcapture.HdSelection
+import com.example.pddpricemonitor.ui.hdcapture.HdSelectionSaver
 import dagger.hilt.android.AndroidEntryPoint
 import androidx.hilt.navigation.compose.hiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -267,6 +270,15 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
     var pendingDelete by remember { mutableStateOf<ProductPrice?>(null) }
     var clearConfirmStep by rememberSaveable { mutableStateOf(0) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    // 截图入口（悬浮球下段产出的画面，独立于记价记录）
+    var showHdGallery by rememberSaveable { mutableStateOf(false) }
+    val hdCaptureCount by viewModel.hdCaptureCount.collectAsState()
+    // 相册选择态放在宿主层：横竖屏/重建后勾选不丢，选择模式也与「选中集合非空」解耦
+    var hdSelection by rememberSaveable(stateSaver = HdSelectionSaver) {
+        mutableStateOf(HdSelection())
+    }
+    // 每次回到前台自增，通知开着的相册重新列举（去拼多多截完图回来要能看到新图）
+    var hdRefreshTick by remember { mutableStateOf(0) }
     // 「今日新低」统计项的点击过滤：激活后列表只显示今日创历史新低的商品，再点一次退出
     var newLowFilter by rememberSaveable { mutableStateOf(false) }
     val newLowTodayIds by viewModel.newLowTodayIds.collectAsState()
@@ -336,6 +348,9 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
         }
         // 存量截图补生成卡片商品图（后台一次，已有 t 图跳过）
         viewModel.backfillThumbs()
+        // 截图张数：悬浮球在别的应用里截图，本进程回到前台时对账一次
+        viewModel.refreshHdCaptureCount()
+        hdRefreshTick++
     }
 
     // 回前台对账「运行中」徽标：球丢失可能发生在 app 退居后台期间（服务已自停、
@@ -347,6 +362,8 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
             if (event == Lifecycle.Event.ON_RESUME) {
                 captureStarted =
                     ScreenCaptureService.isRunning && Settings.canDrawOverlays(context)
+                viewModel.refreshHdCaptureCount()
+                hdRefreshTick++
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -536,6 +553,12 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
                         searchQuery = searchQuery,
                         onSearchQueryChange = { searchQuery = it }
                     )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    // 截图入口：悬浮球下段拍的画面，独立存放，与「最近扫描」的记价记录无关
+                    HdCaptureEntryRow(
+                        count = hdCaptureCount,
+                        onClick = { showHdGallery = true }
+                    )
                     Spacer(modifier = Modifier.height(14.dp))
                     SectionHeader(
                         newLowFilterActive = newLowFilter,
@@ -642,6 +665,22 @@ private fun PriceMonitorApp(viewModel: MainViewModel = hiltViewModel()) {
                 showComparePicker = false
                 compareRefresh++
             }
+        )
+    }
+
+    // 截图相册：独立窗口，只动 filesDir/hd_captures，与记价记录、OCR 附图完全隔离
+    if (showHdGallery) {
+        HdCaptureGalleryDialog(
+            store = viewModel.hdCaptureStore,
+            selection = hdSelection,
+            onSelectionChange = { hdSelection = it },
+            refreshSignal = hdRefreshTick,
+            onDismiss = {
+                showHdGallery = false
+                hdSelection = HdSelection()
+                viewModel.refreshHdCaptureCount()
+            },
+            onChanged = viewModel::refreshHdCaptureCount
         )
     }
 }
@@ -1567,7 +1606,7 @@ private fun SettingsDialog(
                     GroupRow {
                         SettingsRow(
                             title = "保存识别截图",
-                            subtitle = "压缩后每张约 40KB · 删记录同步删图",
+                            subtitle = "识别时另存一张压缩小图（约 40KB，随记价记录删除）；与悬浮球下段的「截图」无关",
                             checked = saveScreenshots,
                             onChange = onSaveScreenshotsChange
                         )
@@ -2020,6 +2059,75 @@ private fun SectionHeader(
         Spacer(modifier = Modifier.weight(1f))
         TextButton(onClick = onClearHistory) {
             Text("清空", color = TextSecondary)
+        }
+    }
+}
+
+// 截图入口行：自绘相机图标 + 标题 + 张数 + chevron（项目无 material-icons 依赖，图标一律自绘）
+@Composable
+private fun HdCaptureEntryRow(count: Int, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(13.dp))
+            .background(CardWhite)
+            .border(0.6.dp, HairlineBorder, RoundedCornerShape(13.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 13.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 相机图标：机身圆角矩形 + 顶部取景凸起 + 镜头圈
+        Canvas(modifier = Modifier.size(17.dp)) {
+            val sw = 1.5.dp.toPx()
+            val ink = TextSecondary
+            val bodyW = size.width * 0.96f
+            val bodyH = size.height * 0.68f
+            val left = (size.width - bodyW) / 2f
+            val top = (size.height - bodyH) / 2f + size.height * 0.07f
+            drawRoundRect(
+                ink,
+                Offset(left, top),
+                Size(bodyW, bodyH),
+                CornerRadius(bodyH * 0.20f),
+                Stroke(sw)
+            )
+            drawRoundRect(
+                ink,
+                Offset(left + bodyW * 0.20f, top - bodyH * 0.26f),
+                Size(bodyW * 0.34f, bodyH * 0.34f),
+                CornerRadius(bodyH * 0.12f),
+                Stroke(sw)
+            )
+            drawCircle(
+                ink,
+                radius = bodyH * 0.26f,
+                center = Offset(size.width / 2f, top + bodyH * 0.54f),
+                style = Stroke(sw)
+            )
+        }
+        Spacer(modifier = Modifier.width(9.dp))
+        Text(
+            text = "截图",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = TextPrimary
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = if (count > 0) "$count 张" else "暂无",
+            style = MaterialTheme.typography.labelMedium,
+            color = TextSecondary
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        // chevron ›：与价格行同画法
+        Canvas(modifier = Modifier.size(width = 7.dp, height = 12.dp)) {
+            val sw = 1.6.dp.toPx()
+            drawLine(TextSecondary, Offset(0f, 0f), Offset(size.width, size.height / 2f), sw, StrokeCap.Round)
+            drawLine(TextSecondary, Offset(size.width, size.height / 2f), Offset(0f, size.height), sw, StrokeCap.Round)
         }
     }
 }

@@ -2,6 +2,7 @@ package com.example.pddpricemonitor.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.pddpricemonitor.data.HdCaptureStore
 import com.example.pddpricemonitor.data.ProductPrice
 import com.example.pddpricemonitor.data.ProductPriceHistory
 import com.example.pddpricemonitor.data.ProductRepository
@@ -26,7 +27,8 @@ import javax.inject.Inject
 class MainViewModel @Inject constructor(
     private val repository: ProductRepository,
     val sync: SyncController,
-    val screenshotStore: ScreenshotStore
+    val screenshotStore: ScreenshotStore,
+    val hdCaptureStore: HdCaptureStore
 ) : ViewModel() {
     val products: StateFlow<List<ProductPrice>> = repository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -71,6 +73,17 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             screenshotStore.backfillThumbs()
             _thumbsVersion.value += 1
+        }
+    }
+
+    // 截图（下段按钮产出）张数：主界面入口徽标用；App 打开与回前台时重算，
+    // 悬浮球在别的应用里截图时本进程不感知，回到前台对账一次即可
+    private val _hdCaptureCount = MutableStateFlow(0)
+    val hdCaptureCount: StateFlow<Int> = _hdCaptureCount
+
+    fun refreshHdCaptureCount() {
+        viewModelScope.launch {
+            _hdCaptureCount.value = hdCaptureStore.countEntries()
         }
     }
 

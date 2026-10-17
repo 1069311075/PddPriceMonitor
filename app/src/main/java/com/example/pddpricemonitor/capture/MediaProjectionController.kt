@@ -2,12 +2,15 @@ package com.example.pddpricemonitor.capture
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.SystemClock
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -80,6 +83,33 @@ class MediaProjectionController(
     }
 
     fun acquireBitmap() = bitmapSource?.acquireLatestBitmap()
+
+    /**
+     * 等一帧「隐藏控件之后」产生的新画面，供截图使用。
+     * ImageReader 里可能还压着隐藏前的旧帧，只认时间戳晚于 [sinceNanos] 的帧；
+     * 个别设备不提供时间戳（0）时退化为「先丢弃一帧再看下一帧」。
+     * @return null = 超时仍未取到新帧（不能拿旧帧冒充成功）
+     */
+    suspend fun acquireFreshFrame(sinceNanos: Long, timeoutMs: Long = 1_200L): Bitmap? {
+        val source = bitmapSource ?: return null
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var discarded = 0
+        while (true) {
+            val frame = source.acquireFrame()
+            if (frame != null) {
+                val fresh = if (frame.timestampNanos > 0L) {
+                    frame.timestampNanos >= sinceNanos
+                } else {
+                    discarded >= 1
+                }
+                if (fresh) return frame.bitmap
+                frame.bitmap.recycle()
+                discarded++
+            }
+            if (SystemClock.elapsedRealtime() >= deadline) return null
+            delay(12L)
+        }
+    }
 
     fun release() {
         _isActive.value = false
