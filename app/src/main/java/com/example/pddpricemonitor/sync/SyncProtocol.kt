@@ -10,6 +10,7 @@ import org.json.JSONObject
 //   {"type":"hello","deviceId":"..","deviceName":".."}
 //   {"type":"full","products":[..],"tombstones":[..]}
 //   {"type":"bye"}
+//   {"type":"ping"} / {"type":"pong"}（心跳：连接保活与死连接判定，旧版本对端会静默忽略 ping）
 sealed class SyncMessage {
     data class Hello(val deviceId: String, val deviceName: String) : SyncMessage()
     data class Full(
@@ -17,6 +18,8 @@ sealed class SyncMessage {
         val tombstones: List<PeerTombstone> = emptyList()
     ) : SyncMessage()
     object Bye : SyncMessage()
+    object Ping : SyncMessage()
+    object Pong : SyncMessage()
 }
 
 object SyncProtocol {
@@ -32,6 +35,8 @@ object SyncProtocol {
             .put("tombstones", encodeTombstones(message.tombstones))
             .toString()
         SyncMessage.Bye -> JSONObject().put("type", "bye").toString()
+        SyncMessage.Ping -> JSONObject().put("type", "ping").toString()
+        SyncMessage.Pong -> JSONObject().put("type", "pong").toString()
     }
 
     // 返回 null 表示无法解析的行（忽略，协议容错）
@@ -47,6 +52,8 @@ object SyncProtocol {
                 tombstones = decodeTombstones(json.optJSONArray("tombstones"))
             )
             "bye" -> SyncMessage.Bye
+            "ping" -> SyncMessage.Ping
+            "pong" -> SyncMessage.Pong
             else -> null
         }
     }.getOrNull()

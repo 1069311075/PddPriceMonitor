@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
@@ -19,6 +20,7 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -166,7 +168,10 @@ class SyncController @Inject constructor(
         val deviceName = DeviceIdentity.deviceName(context)
         val deviceId = DeviceIdentity.deviceId(context)
 
-        socket.soTimeout = 0
+        // 读超时兜底：对端异常消失（杀进程/断网/灭屏被杀）时 TCP 不发 FIN，
+        // readLine() 原本会永久悬挂，UI 永远显示已连接。窗口内收到任何一行（含心跳）自动续期；
+        // 真超时的判定见读循环——见过 Pong（新版本对端）才判死，旧版本对端退回旧行为
+        socket.soTimeout = READ_TIMEOUT_MS.toInt()
         val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
         val writer = PrintWriter(socket.getOutputStream(), true)
 
@@ -184,12 +189,30 @@ class SyncController @Inject constructor(
             }
         }
 
+        // 心跳协程：定期发 ping，对端（新版本）回 pong。作用有二：
+        // ① 让对端的读超时窗口不断续期，连接活着就不被误杀
+        // ② 对端异常死亡后它停发心跳，我们的读超时才能触发死连接判定
+        session.heartbeatJob = scope.launch {
+            while (session.alive && isActive) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                if (!session.alive) break
+                send(SyncMessage.Ping)
+            }
+        }
+
         // 读协程：阻塞读行 → 分发处理
         session.readerJob = scope.launch {
             try {
                 send(SyncMessage.Hello(deviceId, deviceName))
                 while (true) {
-                    val line = reader.readLine() ?: break
+                    val line: String? = try {
+                        reader.readLine()
+                    } catch (_: SocketTimeoutException) {
+                        // 静默超时：新版本对端活着必然每 5s 有一发心跳，15s 一行都没有＝连接已死；
+                        // 没见过 Pong 说明对端是旧版本（不发心跳也不回 pong），退回旧行为继续等数据
+                        if (session.peerSupportsHeartbeat) break else continue
+                    }
+                    if (line == null) break
                     when (val message = SyncProtocol.decode(line)) {
                         is SyncMessage.Hello -> {
                             val peer = Peer(message.deviceId, message.deviceName)
@@ -203,6 +226,8 @@ class SyncController @Inject constructor(
                             if (inserted > 0) lastMergedCount = inserted
                             _lastSyncAt.value = System.currentTimeMillis()
                         }
+                        SyncMessage.Ping -> send(SyncMessage.Pong)
+                        SyncMessage.Pong -> session.peerSupportsHeartbeat = true
                         SyncMessage.Bye -> break
                         null -> Unit // 忽略无法解析的行
                     }
@@ -214,11 +239,12 @@ class SyncController @Inject constructor(
                 runCatching { socket.close() }
                 outgoing.close()
                 session.writerJob?.cancel()
+                session.heartbeatJob?.cancel()
                 session.changeJob?.cancel()
                 sessions.remove(session)
                 // 同设备快速重连时新会话已注册同 deviceId 的 peer 条目——旧会话迟到退出
-                // （无读超时，可能悬挂很久）不能把活条目一并删掉：removePeer 按 deviceId
-                // 过滤不分新旧，误删后 UI 状态回退但新会话的数据同步其实还在跑
+                // 不能把活条目一并删掉：removePeer 按 deviceId 过滤不分新旧，误删后
+                // UI 状态回退但新会话的数据同步其实还在跑
                 val p = session.peer
                 if (p != null && sessions.none { it.peer?.deviceId == p.deviceId }) {
                     removePeer(p, isHost)
@@ -276,8 +302,11 @@ class SyncController @Inject constructor(
         @Volatile var alive = true
         // 本会话握手登记的对端：reader 协程写、其他会话的清理逻辑读，跨线程可见
         @Volatile var peer: Peer? = null
+        // 对端回过 Pong ＝ 新版本（心跳协议生效），读超时才有资格判死连接
+        @Volatile var peerSupportsHeartbeat = false
         var writerJob: Job? = null
         var readerJob: Job? = null
+        var heartbeatJob: Job? = null
         var changeJob: Job? = null
 
         fun close() {
@@ -285,11 +314,16 @@ class SyncController @Inject constructor(
             runCatching { socket.close() }
             writerJob?.cancel()
             readerJob?.cancel()
+            heartbeatJob?.cancel()
             changeJob?.cancel()
         }
     }
 
     companion object {
         const val DEFAULT_PORT = 8899
+
+        // 心跳间隔与读超时：双方各每 5s 一发 ping；15s 内一行都收不到才判连接死亡
+        private const val HEARTBEAT_INTERVAL_MS = 5_000L
+        private const val READ_TIMEOUT_MS = 15_000L
     }
 }
